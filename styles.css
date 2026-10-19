@@ -80,6 +80,9 @@ button:disabled { cursor: wait; opacity: .6; }
 .visualization-toggle { width: 100%; margin-top: 14px; color: #d7e2ef; background: #172232; border: 1px solid #2a3b50; font-size: 12px; }
 .visualization-toggle:hover { color: #fff; background: #202e42; }
 .visualization-panel { margin-top: 10px; min-width: 0; }
+.visualization-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: #d7e2ef; font-size: 11px; }
+.visualization-heading label { display: flex; align-items: center; gap: 5px; color: #8495aa; }
+.visualization-heading select { min-width: 62px; padding: 5px 7px; color: #edf2fa; border: 1px solid #2a3b50; border-radius: 6px; background: #141e2c; }
 .visualization-meta { margin: 0 0 8px; color: #8495aa; font-size: 10px; }
 .indicator-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .indicator-chart-card { min-width: 0; padding: 9px; overflow: hidden; border: 1px solid #29384a; border-radius: 9px; background: #0e1621; }
@@ -89,6 +92,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .chart-summary strong { color: #edf2fa; }
 .chart-footnote, .chart-empty { color: #8495aa; }
 .visualization-message { padding: 10px; border: 1px solid #29384a; border-radius: 8px; background: #0e1621; }
+.visualization-summary { margin: 8px 0 0; padding: 8px; color: #a9bad0; border-radius: 7px; background: #141e2c; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .empty { grid-column: 1 / -1; padding: 30px; color: #8495aa; border: 1px dashed #2a3a4d; border-radius: 12px; text-align: center; }
 .events { margin-top: 24px; padding: 16px; border: 1px solid #253348; border-radius: 13px; background: #111925; }
 .events h2 { margin: 0 0 10px; font-size: 14px; }
@@ -109,6 +113,7 @@ footer p { margin: 5px 0; }
   .cards { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; }
   .indicator-chart-grid { grid-template-columns: 1fr; }
+  .visualization-heading { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 400px) {
   .pair-form { flex-wrap: wrap; }

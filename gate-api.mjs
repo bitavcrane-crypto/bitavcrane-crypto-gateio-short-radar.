@@ -1,5 +1,6 @@
 const API_ROOT = "https://api.gateio.ws/api/v4";
 const CACHE_MS = 15000;
+const VISUALIZATION_CANDLE_LIMIT = 300;
 const cache = new Map();
 
 function numeric(value) {
@@ -32,7 +33,15 @@ export async function fetchTickers() {
 }
 
 export async function fetchCandles(contract, interval) {
-  const query = "?contract=" + encodeURIComponent(contract) + "&interval=" + encodeURIComponent(interval) + "&limit=80";
+  return fetchCandlesWithLimit(contract, interval, 80);
+}
+
+export async function fetchVisualizationCandles(contract, interval) {
+  return fetchCandlesWithLimit(contract, interval, VISUALIZATION_CANDLE_LIMIT);
+}
+
+async function fetchCandlesWithLimit(contract, interval, limit) {
+  const query = "?contract=" + encodeURIComponent(contract) + "&interval=" + encodeURIComponent(interval) + "&limit=" + limit;
   const rows = await request("/futures/usdt/candlesticks" + query, CACHE_MS);
   if (!Array.isArray(rows)) throw new Error("Некоректні свічки " + contract + " " + interval);
   return rows;
