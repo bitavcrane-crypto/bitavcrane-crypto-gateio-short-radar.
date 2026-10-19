@@ -47,8 +47,10 @@
         <label><input type="checkbox" data-indicator="ema" checked> EMA · швидка / повільна
           <input type="number" data-period="ema.fast" min="3" max="30" value="9">
           <input type="number" data-period="ema.slow" min="5" max="60" value="21"></label>
-        <label><input type="checkbox" data-indicator="kdj" checked> KDJ · період
-          <input type="number" data-period="kdj.period" min="5" max="30" value="9"></label>
+        <label><input type="checkbox" data-indicator="kdj" checked> KDJ · довжина / MA1 / MA2
+          <input type="number" data-period="kdj.period" min="5" max="30" value="9" aria-label="KDJ довжина">
+          <input type="number" data-period="kdj.ma1" min="1" max="10" value="3" aria-label="KDJ MA1">
+          <input type="number" data-period="kdj.ma2" min="1" max="10" value="3" aria-label="KDJ MA2"></label>
       </div>
       <button id="reset-confirmation" class="subtle-button" type="button">Відновити стандартні</button>
     </details>
