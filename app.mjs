@@ -197,7 +197,10 @@ function renderStrategyPanel(model) {
     const row = strategy.matrix[interval];
     return '<div class="strategy-matrix-row"><strong>' + interval + '</strong><span>' +
       escapeHtml(row.label) + "</span><small>Ціна " + formatPercent(model.data.changes[interval]) +
-      " · OI " + formatPercent(model.data.oiChanges[interval]) + "</small></div>";
+      " · OI " + formatPercent(model.data.oiChanges[interval]) + "</small>" +
+      (strategy.matrixTransitions && strategy.matrixTransitions[interval] ?
+        '<small class="scenario-transition">Перехід: ' +
+          escapeHtml(strategy.matrixTransitions[interval]) + "</small>" : "") + "</div>";
   }).join("");
   const scoreReasons = strategy.scoreReasons.length ? strategy.scoreReasons.join(" · ") : "Підтвердження для балів відсутні";
   const missing = strategy.missingScoreData.length ? strategy.missingScoreData.join(" · ") : "Немає";
@@ -206,11 +209,21 @@ function renderStrategyPanel(model) {
     "Підтвердженого пробою / ретесту немає";
   const updateTime = model.data.orderBook && model.data.orderBook.fetchedAt ?
     new Date(model.data.orderBook.fetchedAt).toLocaleTimeString("uk-UA") : "немає";
+  const latestCandle = model.data.candles15[model.data.candles15.length - 1];
+  const confirmation = latestCandle ? "підтвердження close " + formatNumber(latestCandle.close, 8) +
+    " · " + new Date((latestCandle.time + 900) * 1000).toLocaleString("uk-UA") : "точка підтвердження недоступна";
+  const levels = model.levels ? "Entry " + formatNumber(model.levels.entry, 8) +
+    " · Stop " + formatNumber(model.levels.stop, 8) + " · TP1/2/3 " +
+    [model.levels.tp1, model.levels.tp2, model.levels.tp3].map(function (value) {
+      return formatNumber(value, 8);
+    }).join(" / ") + " · R/R 1 : " + formatNumber(model.levels.riskReward, 2) :
+    "Entry/Stop/цілі не розраховані";
   return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
     escapeHtml(setup) + '</strong><span>' + (strategy.allowed ? "SHORT ENTRY дозволено" : "NO TRADE") + "</span></div>" +
     '<div class="strategy-matrix">' + matrix + "</div><p><strong>SHORT SCORE " + strategy.score +
     "/100:</strong> " + escapeHtml(scoreReasons) + "</p><p><strong>Відсутні дані:</strong> " +
     escapeHtml(missing) + "</p><p><strong>Блокування:</strong> " + escapeHtml(blockers) +
+    "</p><p><strong>Рівні:</strong> " + escapeHtml(levels) + " · " + escapeHtml(confirmation) +
     "</p><p class=\"strategy-time\">Книга заявок оновлена: " + escapeHtml(updateTime) +
     " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
 }
@@ -238,6 +251,11 @@ function chartSvg(seriesList, options) {
     return '<line x1="0" y1="' + y(value) + '" x2="' + width + '" y2="' + y(value) +
       '" stroke="#4c5b6c" stroke-dasharray="4 4"/>';
   }).join("");
+  const markers = (options.markers || []).map(function (index) {
+    const position = x(index, options.markerLength || 1);
+    return '<line x1="' + position + '" y1="0" x2="' + position + '" y2="' + height +
+      '" stroke="#ff958c" stroke-dasharray="3 3"/>';
+  }).join("");
   const paths = seriesList.map(function (series) {
     const points = series.values.map(function (value, index) {
       return typeof value === "number" && Number.isFinite(value) ? x(index, series.values.length) + "," + y(value) : null;
@@ -246,7 +264,7 @@ function chartSvg(seriesList, options) {
       points.join(" ") + '"/>' : "";
   }).join("");
   return '<svg class="indicator-chart-svg" viewBox="0 0 320 104" role="img" aria-label="' +
-    escapeHtml(options.label) + '" preserveAspectRatio="none">' + backgrounds + guides + paths + "</svg>";
+    escapeHtml(options.label) + '" preserveAspectRatio="none">' + backgrounds + guides + markers + paths + "</svg>";
 }
 
 function directionLabel(value) {
@@ -380,7 +398,12 @@ function renderIndicatorVisualization(pair) {
       return '<div class="indicator-chart-grid market-chart-grid">' +
         '<section class="indicator-chart-card"><h4>Ціна · 15m</h4>' +
         chartSvg([{ values: recent.map(function (candle) { return candle.close; }), color: "#f3f5f7" }],
-          { label: "Ціна close, 15m" }) + "</section>" +
+          {
+            label: "Ціна close, 15m",
+            guides: model.strategy.setup ? [model.strategy.setup.level] : [],
+            markers: recent.length ? [recent.length - 1] : [],
+            markerLength: recent.length
+          }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Обсяг · 15m</h4>' +
         chartSvg([{ values: recent.map(function (candle) { return candle.volume; }), color: "#e8b86d" }],
           { label: "Обсяг контрактів, 15m" }) + "</section>" +
@@ -473,8 +496,9 @@ function renderCard(pair) {
       model.strategy.matrix["15m"].label + " / " + model.strategy.matrix["1h"].label + " / " +
         model.strategy.matrix["4h"].label : "Немає даних",
       model.strategy && model.strategy.dataReady ? "OK" : "INCOMPLETE") +
-    metric("Спред / глибина книги", data.orderBook && data.orderBook.quality === "OK" ?
-      formatNumber(data.orderBook.spreadPercent, 3) + "% / $" + formatNumber(data.orderBook.depthUsd, 0) :
+    metric("Спред / slippage / глибина книги", data.orderBook && data.orderBook.quality === "OK" ?
+      formatNumber(data.orderBook.spreadPercent, 3) + "% / " +
+        formatPercent(data.orderBook.slippagePercent) + " / $" + formatNumber(data.orderBook.depthUsd, 0) :
       "NO TRADE · дані недоступні", data.orderBook ? data.orderBook.quality : "NO DATA") +
     metric("Funding / період", funding + " / " + interval,
       typeof ticker.funding !== "number" ? "NO DATA" : data.fundingIntervalSeconds ? "OK" : "INCOMPLETE") +
@@ -596,7 +620,20 @@ function lastSuccessLabel() {
 function markPairUnavailable(pair, message) {
   pairErrors[pair] = message;
   if (!models[pair]) return;
+  const unavailableReason = "NO TRADE — DATA UNAVAILABLE: " + message;
+  const strategy = models[pair].strategy ? Object.assign({}, models[pair].strategy, {
+    allowed: false,
+    dataReady: false,
+    missingData: true,
+    blockers: [unavailableReason],
+    score: 0,
+    scoreReasons: [],
+    missingScoreData: ["останні дані застаріли"]
+  }) : null;
   models[pair] = Object.assign({}, models[pair], {
+    data: Object.assign({}, models[pair].data, {
+      orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" })
+    }),
     state: { key: "incomplete", label: "Дані недоступні", score: 0 },
     quality: "STALE",
     pumpScore: null,
@@ -604,6 +641,7 @@ function markPairUnavailable(pair, message) {
     shortScore: null,
     confidence: "Немає даних",
     levels: null,
+    strategy: strategy,
     indicatorConfirmation: evaluateShortConfirmation([], { state: { key: "incomplete" } },
       confirmationSettings, Math.floor(Date.now() / 1000)),
     why: "Оновлення не вдалося (" + message + "). Показані останні значення застаріли й не є підтвердженням для входу."

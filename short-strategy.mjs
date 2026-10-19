@@ -1,6 +1,8 @@
 const FLAT_THRESHOLD = 0.1;
 const MIN_BOOK_DEPTH_USD = 10000;
+const MIN_DAILY_VOLUME_USD = 1000000;
 const MAX_SPREAD_PERCENT = 0.2;
+const MAX_SLIPPAGE_PERCENT = 0.15;
 
 function finite(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -34,7 +36,10 @@ export function classifyPriceOi(priceChange, oiChange) {
     !oiDirection ? (priceDirection > 0 ? "up_flat" : "down_flat") :
       priceDirection > 0 ? (oiDirection > 0 ? "up_up" : "up_down") :
         (oiDirection > 0 ? "down_up" : "down_down");
-  return { key: key, label: scenarioLabel(priceChange, oiChange) };
+  const magnitude = Math.max(Math.abs(priceChange), Math.abs(oiChange));
+  const strength = key === "flat_flat" ? "НЕЗМІННІ" :
+    magnitude >= 3 ? "РІЗКІ ЗМІНИ" : magnitude < 0.5 ? "СЛАБКІ ЗМІНИ" : "ПОМІРНІ ЗМІНИ";
+  return { key: key, strength: strength, label: scenarioLabel(priceChange, oiChange) + " · " + strength };
 }
 
 function candlesBearish(candles) {
@@ -78,7 +83,7 @@ function findFailedRetest(candles) {
   if (!Array.isArray(candles) || candles.length < 8) return null;
   const latestIndex = candles.length - 1;
   const latest = candles[latestIndex];
-  if (!candlesBearish(candles)) return null;
+  if (latest.close >= latest.open) return null;
   for (let index = Math.max(3, latestIndex - 8); index < latestIndex - 1; index += 1) {
     const base = candles.slice(Math.max(0, index - 3), index);
     if (base.length < 3) continue;
@@ -94,7 +99,7 @@ function findFailedRetest(candles) {
 function findFailedHighBreak(candles) {
   if (!Array.isArray(candles) || candles.length < 8) return null;
   const latest = candles[candles.length - 1];
-  if (!candlesBearish(candles)) return null;
+  if (latest.close >= latest.open) return null;
   const start = Math.max(0, candles.length - 8);
   const prior = candles.slice(start, -1);
   const level = Math.max.apply(null, prior.map(function (candle) { return candle.high; }));
@@ -145,15 +150,20 @@ function scoreShort(input, flags) {
     add(input.indicators.obvDivergence ? 4 : 0, input.indicators.obvDivergence ?
       "OBV не підтверджує максимум" : "OBV-дивергенція відсутня");
   } else missing.push("OBV недоступний");
-  if (finite(input.fundingNormalized) && finite(input.stats.lsrAccount)) {
+  if (finite(input.fundingNormalized) && input.stats && finite(input.stats.lsrAccount)) {
     add(input.fundingNormalized >= 0 && input.stats.lsrAccount >= 1 ? 10 : 0,
       input.fundingNormalized >= 0 && input.stats.lsrAccount >= 1 ?
         "funding/позиціонування не суперечать SHORT" : "funding/позиціонування не дають переваги SHORT");
   } else missing.push("funding або позиціонування недоступні");
+  if (!input.stats || !finite(input.stats.shortLiquidationUsd) ||
+      !finite(input.stats.longLiquidationUsd)) missing.push("ліквідації LONG/SHORT недоступні");
   if (flags.setup) add(10, "підтверджено " + flags.setup.type);
   if (input.orderBook && input.orderBook.quality === "OK") {
     if (input.orderBook.depthUsd >= MIN_BOOK_DEPTH_USD &&
-        input.orderBook.spreadPercent <= MAX_SPREAD_PERCENT) {
+        input.orderBook.spreadPercent <= MAX_SPREAD_PERCENT &&
+        finite(input.orderBook.slippagePercent) &&
+        input.orderBook.slippagePercent <= MAX_SLIPPAGE_PERCENT &&
+        input.ticker && input.ticker.volume24h >= MIN_DAILY_VOLUME_USD) {
       add(10, "ліквідність і спред придатні");
     } else {
       add(4, "ліквідність/спред обмежують виконання");
@@ -179,7 +189,9 @@ export function evaluateShortStrategy(input) {
   const candles1h = candles["1h"] || [];
   const candles4h = candles["4h"] || [];
   const latest15 = candles15[candles15.length - 1];
-  const sellingCandle = Boolean(latest15 && latest15.close < latest15.open);
+  const latestRange = latest15 ? latest15.high - latest15.low : 0;
+  const sellingCandle = Boolean(latest15 && latest15.close < latest15.open && latestRange > 0 &&
+    (latest15.close - latest15.low) / latestRange <= 0.5);
   const bearish15m = candlesBearish(candles15);
   const bearish1h = bearishOneHour(candles1h);
   const strongBullish4h = bullishFourHour(candles4h, changes["4h"]);
@@ -189,30 +201,47 @@ export function evaluateShortStrategy(input) {
     findBreakdown(candles15)
   ].filter(Boolean);
   const setup = candidates[0] || null;
-  const dataReady = ["15m", "1h", "4h"].every(function (interval) {
+  const dataReady = Boolean(["15m", "1h", "4h"].every(function (interval) {
     return input.qualities && input.qualities[interval] === "OK";
   }) && ["15m", "1h", "4h"].every(function (interval) {
     return finite(oiChanges[interval]) && finite(changes[interval]);
   }) && input.stats && input.stats.quality === "OK" &&
-    input.orderBook && input.orderBook.quality === "OK";
-  const matrixConflict = matrix["4h"].key.startsWith("up_") &&
-    matrix["1h"].key.startsWith("down_");
+    input.ticker && input.ticker.quality === "OK" && finite(input.ticker.last) &&
+    finite(input.ticker.volume24h) && input.orderBook && input.orderBook.quality === "OK" &&
+    input.stats && finite(input.stats.shortLiquidationUsd) && finite(input.stats.longLiquidationUsd));
+  const matrixConflict = (matrix["4h"].key.startsWith("up_") && matrix["1h"].key.startsWith("down_")) ||
+    (matrix["4h"].key.startsWith("down_") && matrix["1h"].key.startsWith("up_"));
   const oiContradiction = matrix["4h"].key === "up_up" ||
     matrix["4h"].key === "up_down" ||
     (matrix["1h"].key.startsWith("up_") && !setup);
   const shortSqueezeRisk = Boolean(input.stats && finite(input.stats.shortLiquidationUsd) &&
     finite(input.stats.longLiquidationUsd) && input.stats.shortLiquidationUsd > 0 &&
-    input.stats.shortLiquidationUsd > input.stats.longLiquidationUsd * 3);
+    input.stats.shortLiquidationUsd > input.stats.longLiquidationUsd * 3) ||
+    Boolean(finite(input.fundingNormalized) && input.fundingNormalized <= -0.001 &&
+      input.stats && finite(input.stats.lsrAccount) && input.stats.lsrAccount < 0.8);
+  const liquidationFlush = ["15m", "1h", "4h"].some(function (interval) {
+    return matrix[interval].key === "down_down" &&
+      finite(changes[interval]) && changes[interval] <= -2 &&
+      finite(oiChanges[interval]) && oiChanges[interval] <= -2;
+  });
   const stretched = (finite(changes["4h"]) && changes["4h"] <= -8) ||
     Boolean(latest15 && latest15.open > 0 && (latest15.open - latest15.close) / latest15.open >= 0.04);
   const bookBlocked = !input.orderBook || input.orderBook.quality !== "OK" ||
     input.orderBook.spreadPercent > MAX_SPREAD_PERCENT ||
-    input.orderBook.depthUsd < MIN_BOOK_DEPTH_USD;
+    input.orderBook.depthUsd < MIN_BOOK_DEPTH_USD ||
+    !finite(input.orderBook.slippagePercent) ||
+    input.orderBook.slippagePercent > MAX_SLIPPAGE_PERCENT ||
+    !input.ticker || input.ticker.volume24h < MIN_DAILY_VOLUME_USD;
   const levels = input.levels;
   const riskReward = levels && finite(levels.riskReward) ? levels.riskReward : null;
-  const minimumRiskReward = finite(input.minimumRiskReward) ? input.minimumRiskReward : 1.5;
+  const minimumRiskReward = finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
+    input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5;
   const blockers = [];
   if (!dataReady) blockers.push("NO TRADE — DATA UNAVAILABLE: немає закритих даних 15m/1h/4h, OI або книги заявок");
+  if (!input.stats || !finite(input.stats.shortLiquidationUsd) ||
+      !finite(input.stats.longLiquidationUsd)) {
+    blockers.push("NO TRADE — DATA UNAVAILABLE: немає напрямлених агрегатів ліквідацій для оцінки squeeze-ризику");
+  }
   if (setup && !sellingCandle) blockers.push("немає підтвердженого тиску продажів");
   if (setup && input.volumeRatio === null) blockers.push("обсяг продажів недоступний");
   else if (setup && input.volumeRatio < 1.5) blockers.push("обсяг продажів не перевищує базу у 1,5 раза");
@@ -221,6 +250,9 @@ export function evaluateShortStrategy(input) {
   if (matrixConflict) blockers.push("критичний конфлікт Price × OI між 1h та 4h");
   if (oiContradiction) blockers.push("Price × OI 4h суперечить SHORT; потрібне підтверджене завершення росту");
   if (shortSqueezeRisk) blockers.push("критичний ризик short squeeze за даними ліквідацій");
+  if (liquidationFlush && (!setup || setup.type !== "failed_retest")) {
+    blockers.push("після різкого падіння ціни й OI потрібно дочекатися відскоку та невдалого ретесту");
+  }
   if (stretched) blockers.push("рух надмірно розтягнутий; не переслідувати падіння");
   if (bookBlocked && dataReady) blockers.push("ліквідність/спред книги заявок не проходять поріг");
   if (setup && (riskReward === null || riskReward < minimumRiskReward)) {
@@ -235,7 +267,8 @@ export function evaluateShortStrategy(input) {
   });
   const allowed = Boolean(dataReady && setup && sellingCandle && input.volumeRatio >= 1.5 &&
     bearish1h && !strongBullish4h && !matrixConflict && !oiContradiction &&
-    !shortSqueezeRisk && !stretched && !bookBlocked &&
+    !shortSqueezeRisk && (!liquidationFlush || setup.type === "failed_retest") &&
+    !stretched && !bookBlocked &&
     riskReward !== null && riskReward >= minimumRiskReward);
   const missingData = !dataReady;
   return {
@@ -256,6 +289,7 @@ export function evaluateShortStrategy(input) {
       strongBullish4h: strongBullish4h,
       matrixConflict: matrixConflict,
       shortSqueezeRisk: shortSqueezeRisk,
+      liquidationFlush: liquidationFlush,
       stretched: stretched
     }
   };

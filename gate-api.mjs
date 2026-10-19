@@ -121,14 +121,34 @@ export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
       return sum + level.price * level.size * multiplier;
     }, 0);
   };
+  const estimateSlippage = function (items) {
+    const targetUsd = 1000;
+    let remainingBase = targetUsd / items[0].price;
+    let filledBase = 0;
+    let value = 0;
+    items.forEach(function (level) {
+      const availableBase = level.size * multiplier;
+      const fillBase = Math.min(remainingBase, availableBase);
+      filledBase += fillBase;
+      value += fillBase * level.price;
+      remainingBase -= fillBase;
+    });
+    if (remainingBase > 0 || filledBase === 0) return null;
+    const vwap = value / filledBase;
+    return Math.abs(vwap / items[0].price - 1) * 100;
+  };
   const bidDepth = depthWithinHalfPercent(bids);
   const askDepth = depthWithinHalfPercent(asks);
+  const bidSlippage = estimateSlippage(bids);
+  const askSlippage = estimateSlippage(asks);
   return {
     quality: "OK",
     bestBid: bestBid,
     bestAsk: bestAsk,
     spreadPercent: (bestAsk / bestBid - 1) * 100,
     depthUsd: Math.min(bidDepth, askDepth),
+    slippagePercent: bidSlippage === null || askSlippage === null ? null :
+      Math.max(bidSlippage, askSlippage),
     fetchedAt: fetchedAtMs || Date.now()
   };
 }

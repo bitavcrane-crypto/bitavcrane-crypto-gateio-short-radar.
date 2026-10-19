@@ -91,6 +91,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .strategy-matrix-row strong { color: #77c8ff; }
 .strategy-matrix-row span { font-weight: 700; }
 .strategy-matrix-row small, .strategy-time { color: #8495aa !important; }
+.strategy-matrix-row .scenario-transition { color: #ffc76f !important; }
 .visualization-toggle { width: 100%; margin-top: 14px; color: #d7e2ef; background: #172232; border: 1px solid #2a3b50; font-size: 12px; }
 .visualization-toggle:hover { color: #fff; background: #202e42; }
 .visualization-panel { margin-top: 10px; min-width: 0; }

@@ -83,28 +83,31 @@ export function relativeChange(current, previous) {
   return (current / previous - 1) * 100;
 }
 
-export function calculateContractMetrics(stats) {
+export function calculateContractMetrics(stats, timeAnchors) {
   const rows = stats && Array.isArray(stats.rows) ? stats.rows : [];
   const quality = stats && stats.quality ? stats.quality : QUALITY.NO_DATA;
   const latest = rows.length ? rows[rows.length - 1] : null;
-  function valueAtOrBefore(ageSeconds, field) {
+  function valueAtOrBefore(target, field) {
     if (!latest) return null;
-    const target = latest.time - ageSeconds;
     let match = null;
     rows.forEach(function (row) {
       if (row.time <= target && finite(row[field]) && (!match || row.time > match.time)) match = row;
     });
     return match;
   }
-  function change(field, ageSeconds) {
-    if (!latest || !finite(latest[field])) return null;
-    const previous = valueAtOrBefore(ageSeconds, field);
-    return previous ? relativeChange(latest[field], previous[field]) : null;
+  function change(field, ageSeconds, anchor) {
+    const endTime = finite(anchor) ? anchor : latest && latest.time;
+    if (!finite(endTime)) return null;
+    const current = valueAtOrBefore(endTime, field);
+    const previous = valueAtOrBefore(endTime - ageSeconds, field);
+    return current && previous ? relativeChange(current[field], previous[field]) : null;
   }
-  function ratioChange(field, ageSeconds) {
-    if (!latest || !finite(latest[field])) return null;
-    const previous = valueAtOrBefore(ageSeconds, field);
-    return previous && previous[field] !== 0 ? relativeChange(latest[field], previous[field]) : null;
+  function ratioChange(field, ageSeconds, anchor) {
+    const endTime = finite(anchor) ? anchor : latest && latest.time;
+    if (!finite(endTime)) return null;
+    const current = valueAtOrBefore(endTime, field);
+    const previous = valueAtOrBefore(endTime - ageSeconds, field);
+    return current && previous && previous[field] !== 0 ? relativeChange(current[field], previous[field]) : null;
   }
   return {
     quality: quality,
@@ -112,13 +115,13 @@ export function calculateContractMetrics(stats) {
     openInterest: latest && finite(latest.openInterest) ? latest.openInterest : null,
     openInterestUsd: latest && finite(latest.openInterestUsd) ? latest.openInterestUsd : null,
     oiChanges: {
-      "15m": change("openInterest", 900),
-      "1h": change("openInterest", 3600),
-      "4h": change("openInterest", 14400)
+      "15m": change("openInterest", 900, timeAnchors && timeAnchors["15m"]),
+      "1h": change("openInterest", 3600, timeAnchors && timeAnchors["1h"]),
+      "4h": change("openInterest", 14400, timeAnchors && timeAnchors["4h"])
     },
     lsrAccount: latest && finite(latest.lsrAccount) ? latest.lsrAccount : null,
     lsrTaker: latest && finite(latest.lsrTaker) ? latest.lsrTaker : null,
-    lsrAccountChange15m: ratioChange("lsrAccount", 900),
+    lsrAccountChange15m: ratioChange("lsrAccount", 900, timeAnchors && timeAnchors["15m"]),
     longLiquidationUsd: latest && finite(latest.longLiquidationUsd) ? latest.longLiquidationUsd : null,
     shortLiquidationUsd: latest && finite(latest.shortLiquidationUsd) ? latest.shortLiquidationUsd : null,
     markPrice: latest && finite(latest.markPrice) ? latest.markPrice : null,
@@ -355,7 +358,12 @@ export function buildMarketData(input) {
   };
   const ratio = volumeRatio(normalized["15m"], 20);
   const indicators = calculateIndicators(normalized["15m"]);
-  const stats = calculateContractMetrics(input.stats);
+  const timeAnchors = {};
+  ["15m", "1h", "4h"].forEach(function (interval) {
+    const series = normalized[interval];
+    if (series.length) timeAnchors[interval] = series[series.length - 1].time + INTERVAL_SECONDS[interval];
+  });
+  const stats = calculateContractMetrics(input.stats, timeAnchors);
   const currentOi = stats.openInterest;
   const oiChanges = stats.oiChanges;
   const oiChange15m = finite(oiChanges["15m"]) ? oiChanges["15m"] : null;
@@ -378,7 +386,8 @@ export function buildMarketData(input) {
     oiChange15m: oiChange15m,
     fundingIntervalSeconds: fundingInterval,
     fundingNormalized: fundingNormalized,
-    minimumRiskReward: finite(input.minimumRiskReward) ? input.minimumRiskReward : 1.5
+    minimumRiskReward: finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
+      input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5
   };
   const pump = scorePump(changes, ratio);
   const exhaustion = normalized["15m"].length ?
@@ -521,8 +530,15 @@ function explain(data, pump, exhaustion, state, strategy) {
 export function transitionSignal(current, previous, lastCandleTime) {
   if (!current || !current.data || !current.data.candles15.length) return current;
   const candleTime = current.data.candles15[current.data.candles15.length - 1].time;
-  if (previous && previous.state.key !== "incomplete" && lastCandleTime === candleTime) {
-    return Object.assign({}, previous, { unchangedCandle: true });
+  if (current.strategy && previous && previous.strategy) {
+    const matrixTransitions = {};
+    ["15m", "1h", "4h"].forEach(function (interval) {
+      const oldMatrix = previous.strategy.matrix && previous.strategy.matrix[interval];
+      const newMatrix = current.strategy.matrix && current.strategy.matrix[interval];
+      matrixTransitions[interval] = oldMatrix && newMatrix && oldMatrix.label !== newMatrix.label ?
+        oldMatrix.label + " → " + newMatrix.label : null;
+    });
+    current.strategy = Object.assign({}, current.strategy, { matrixTransitions: matrixTransitions });
   }
   if (previous && (previous.state.key === "setup" || previous.state.key === "entry") &&
       previous.levels && current.data.candles15[current.data.candles15.length - 1].close >= previous.levels.stop) {
@@ -530,8 +546,19 @@ export function transitionSignal(current, previous, lastCandleTime) {
       state: { key: "cancelled", label: "SHORT скасовано", score: 0 },
       shortScore: 0,
       levels: null,
+      strategy: Object.assign({}, current.strategy, {
+        allowed: false,
+        blockers: (current.strategy && current.strategy.blockers || []).concat(
+          "ціна закрилася вище Stop / рівня інвалідації"
+        )
+      }),
       why: "Закриття 15m вище STOP / рівня інвалідації. Попередній SHORT-сценарій скасовано."
     });
+  }
+  if (previous && lastCandleTime === candleTime) {
+    current.candleTime = candleTime;
+    current.unchangedCandle = true;
+    return current;
   }
   if (previous && previous.state.key === "cancelled" && current.state.key === "none") {
     current.state = { key: "cancelled", label: "CANCEL", score: 0 };
