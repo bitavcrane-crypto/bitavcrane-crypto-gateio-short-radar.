@@ -207,6 +207,23 @@ test("crosshair selection from every chart synchronizes panels by timestamp and 
   assert.deepEqual(selected.updates.map(function (update) { return update.values; }), [[12, 3], [60], [9]]);
 });
 
+test("selecting a sparse indicator timestamp resolves the primary chart's exact historical close", function () {
+  const times = [1700000000, 1700000900, 1700001800, 1700002700];
+  let selected;
+  const controller = createCrosshairController([
+    { times: times, series: [{ label: "Close", times: times, values: [101, 98, 95, 93] }] },
+    { times: times, series: [{ label: "OBV", times: times, values: [10, 20, 30, 40] }] },
+    { times: times, series: [{ label: "OI", times: [times[0], times[3]], values: [500, 530] }] }
+  ], function (timestamp, updates) {
+    selected = { timestamp: timestamp, updates: updates };
+  });
+
+  assert.equal(controller.selectAt(2, 2 / 3), times[2]);
+  assert.equal(selected.timestamp, times[2]);
+  assert.deepEqual(selected.updates.map(function (update) { return update.position; }), [2 / 3, 2 / 3, 2 / 3]);
+  assert.deepEqual(selected.updates.map(function (update) { return update.values[0]; }), [95, 30, null]);
+});
+
 test("crosshair values never interpolate missing history and the bottom label shows the exact UTC candle time", function () {
   const timestamp = 1700000900;
   const series = [
@@ -229,4 +246,9 @@ test("crosshair maps pointer coordinates through the SVG plot area and positions
   assert.equal(valueAtPosition(100, 0, 100, 5, 99), 5);
   assert.equal(valueAtPosition(null, 0, 100, 5, 99), null);
   assert.equal(valueAtPosition(101, 0, 100, 5, 99), null);
+
+  const scaledX = 80 + (330 / 660) * 330;
+  assert.equal(positionAtClientX(scaledX, { left: 80, width: 330 }, 660, 20, 640), 0.5);
+  assert.equal(positionAtClientX(80 + 20 / 660 * 330, { left: 80, width: 330 }, 660, 20, 640), 0);
+  assert.equal(valueAtPosition(25, 0, 100, 10, 210), 160);
 });

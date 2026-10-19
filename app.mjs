@@ -144,16 +144,19 @@ function formatPercent(value) {
 }
 
 function qualityLabel(value) {
-  return value ? '<small class="quality">' + escapeHtml(value) + "</small>" : "";
+  const state = value ? String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-") : "";
+  return value ? '<small class="quality quality-' + state + '">' + escapeHtml(value) + "</small>" : "";
 }
 
-function metric(label, value, quality) {
-  return '<div class="metric"><span>' + label + qualityLabel(quality) +
+function metric(label, value, quality, kind) {
+  const qualityState = quality ? " metric-" + String(quality).toLowerCase().replace(/[^a-z0-9]+/g, "-") : "";
+  return '<div class="metric' + (kind ? " " + kind : "") + qualityState + '"><span>' + label + qualityLabel(quality) +
     '</span><strong>' + escapeHtml(value) + "</strong></div>";
 }
 
 function score(label, value) {
-  return '<div class="score"><span>' + label + '</span><strong>' +
+  const kind = label === "SHORT" ? "score-short" : label === "PUMP" ? "score-pump" : "score-exhaustion";
+  return '<div class="score ' + kind + '"><span>' + label + '</span><strong>' +
     (typeof value === "number" && Number.isFinite(value) ? value + "/100" : "Немає даних") + "</strong></div>";
 }
 
@@ -302,22 +305,22 @@ function chartSvg(seriesList, options) {
   const seriesData = seriesList.map(function (series) {
     return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits };
   });
-  const valueLabels = seriesList.map(function (series, index) {
-    return '<text data-crosshair-value="' + index + '" fill="' + series.color + '" x="' + (width - 3) +
-      '" y="' + (12 + index * 12) + '" text-anchor="end">' + escapeHtml(series.label || "Значення") + ": —</text>";
-  }).join("");
   return '<svg class="indicator-chart-svg" viewBox="0 0 440 104" role="img" aria-label="' +
     escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-viewbox-width="' + width +
     '" data-chart-plot-start="' + pad + '" data-chart-plot-end="' + (plotEnd - pad) +
     '" data-chart-plot-top="' + plotTop + '" data-chart-plot-bottom="' + plotBottom +
-    '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-times=\'' +
+    '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-role="' +
+    (options.priceChart ? "price" : "indicator") + '" data-chart-times=\'' +
     JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
     backgrounds + guides + markers + paths +
     '<line data-crosshair-horizontal x1="' + pad + '" y1="' + plotTop + '" x2="' + (plotEnd - pad) +
-    '" y2="' + plotTop + '" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
+    '" y2="' + plotTop + '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
     '<line data-crosshair-line x1="' + pad + '" y1="' + plotTop + '" x2="' + pad + '" y2="' + plotBottom +
-    '" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
-    valueLabels + "</svg>";
+    '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
+    (options.priceChart ?
+      '<g data-crosshair-price-label visibility="hidden" pointer-events="none"><rect x="330" y="2" width="108" height="14" rx="3" fill="#123344" stroke="#56d9f5"/>' +
+      '<text data-crosshair-price x="435" y="12" text-anchor="end" fill="#8cecff" font-size="10" font-weight="700">Немає даних</text></g>' : "") +
+    "</svg>";
 }
 
 function directionLabel(value) {
@@ -374,7 +377,8 @@ function renderIndicatorVisualization(pair) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
   }
   const indicators = view.indicators;
-  const chartTimes = view.candles.slice(-48).map(function (candle) { return candle.time; });
+  const chartCandles = view.candles.slice(-48);
+  const chartTimes = chartCandles.map(function (candle) { return candle.time; });
   const chartStartTime = chartTimes[0];
   const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
@@ -458,7 +462,7 @@ function renderIndicatorVisualization(pair) {
     '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
     "</h4>" + kdjContent + "</section></div>" +
     (model && model.data ? (function () {
-      const recent = view.candles.slice(-40);
+      const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
       const oiHistory = model.data.stats.history.filter(function (row) {
         return row.time >= chartStartTime && row.time <= chartEndTime;
@@ -473,6 +477,7 @@ function renderIndicatorVisualization(pair) {
             label: "Ціна close, " + interval, times: recentTimes, domainTimes: chartTimes,
             markers: recentTimes.length ? [recentTimes.length - 1] : [],
             guides: model.strategy.setup ? [model.strategy.setup.level] : [],
+            priceChart: true
           }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Обсяг · ' + interval + "</h4>" +
         chartSvg([{
@@ -523,9 +528,14 @@ function bindSynchronizedCrosshair(panel, pair) {
       const svg = chartElements[chartIndex];
       const line = svg.querySelector("[data-crosshair-line]");
       const horizontal = svg.querySelector("[data-crosshair-horizontal]");
+      const priceLabel = svg.querySelector("[data-crosshair-price-label]");
       if (update.position === null) {
         line.setAttribute("visibility", "hidden");
         horizontal.setAttribute("visibility", "hidden");
+        if (priceLabel) {
+          priceLabel.querySelector("[data-crosshair-price]").textContent = "Немає даних";
+          priceLabel.setAttribute("visibility", "visible");
+        }
       } else {
         const plotStart = Number(svg.getAttribute("data-chart-plot-start"));
         const plotEnd = Number(svg.getAttribute("data-chart-plot-end"));
@@ -535,22 +545,27 @@ function bindSynchronizedCrosshair(panel, pair) {
         line.setAttribute("x1", String(x));
         line.setAttribute("x2", String(x));
         line.setAttribute("visibility", "visible");
-        const y = valueAtPosition(update.values[0], Number(svg.getAttribute("data-chart-min")),
-          Number(svg.getAttribute("data-chart-max")), plotTop, plotBottom);
-        if (y === null) {
-          horizontal.setAttribute("visibility", "hidden");
+        if (priceLabel) {
+          const price = update.values[0];
+          const y = valueAtPosition(price, Number(svg.getAttribute("data-chart-min")),
+            Number(svg.getAttribute("data-chart-max")), plotTop, plotBottom);
+          if (y === null) {
+            horizontal.setAttribute("visibility", "hidden");
+            priceLabel.querySelector("[data-crosshair-price]").textContent = "Немає даних";
+            priceLabel.setAttribute("transform", "translate(0 0)");
+          } else {
+            horizontal.setAttribute("y1", String(y));
+            horizontal.setAttribute("y2", String(y));
+            horizontal.setAttribute("visibility", "visible");
+            const labelY = Math.max(2, Math.min(88, y - 7));
+            priceLabel.querySelector("[data-crosshair-price]").textContent = formatNumber(price, 8);
+            priceLabel.setAttribute("transform", "translate(0 " + (labelY - 2) + ")");
+          }
+          priceLabel.setAttribute("visibility", "visible");
         } else {
-          horizontal.setAttribute("y1", String(y));
-          horizontal.setAttribute("y2", String(y));
-          horizontal.setAttribute("visibility", "visible");
+          horizontal.setAttribute("visibility", "hidden");
         }
       }
-      svg.querySelectorAll("[data-crosshair-value]").forEach(function (label, seriesIndex) {
-        const series = charts[chartIndex].series[seriesIndex];
-        const value = update.values[seriesIndex];
-        label.textContent = (series.label || "Значення") + ": " +
-          (Number.isFinite(value) ? formatNumber(value, series.digits) : "Немає даних");
-      });
     });
     timeLabels.forEach(function (label) {
       label.textContent = "Час свічки: " + formatCrosshairTime(timestamp);
@@ -660,21 +675,23 @@ function renderCard(pair) {
       data.volumeRatio === null || ticker.volume24h === null ? "INCOMPLETE" : "OK") +
     metric("OI · контракти / USD", stats.openInterest === null ? "Немає даних" :
       formatNumber(stats.openInterest, 2) + " / $" + formatNumber(stats.openInterestUsd, 2),
-      openInterestQuality) +
+      openInterestQuality, "metric-open-interest") +
     metric("Δ OI · 15m / 1h / 4h", formatPercent(data.oiChanges["15m"]) + " / " +
       formatPercent(data.oiChanges["1h"]) + " / " + formatPercent(data.oiChanges["4h"]),
-      stats.quality === "OK" && oiChangesComplete ? "OK" : "INCOMPLETE") +
+      stats.quality === "OK" && oiChangesComplete ? "OK" : "INCOMPLETE", "metric-open-interest") +
     metric("Price × OI · 15m / 1h / 4h", model.strategy ?
       model.strategy.matrix["15m"].label + " / " + model.strategy.matrix["1h"].label + " / " +
         model.strategy.matrix["4h"].label : "Немає даних",
-      model.strategy && model.strategy.dataReady ? "OK" : "INCOMPLETE") +
+      model.strategy && model.strategy.dataReady ? "OK" : "INCOMPLETE", "metric-market-structure") +
     metric("Спред / slippage $1000 / min bid/ask ±0,5%", data.orderBook && data.orderBook.quality === "OK" ?
       formatNumber(data.orderBook.spreadPercent, 3) + "% / " +
         formatPercent(data.orderBook.slippagePercent) + " / $" + formatNumber(data.orderBook.depthUsd, 0) :
       "NO TRADE · дані недоступні", data.orderBook && data.orderBook.quality === "OK" ?
-        model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA") +
+        model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA",
+      "metric-liquidity") +
     metric("Funding / період", funding + " / " + interval,
-      ticker.quality !== "OK" ? ticker.quality : !Number.isFinite(data.fundingNormalized) ? "INCOMPLETE" : "OK") +
+      ticker.quality !== "OK" ? ticker.quality : !Number.isFinite(data.fundingNormalized) ? "INCOMPLETE" : "OK",
+      "metric-funding") +
     metric("Ліквідації · 5m USD", stats.longLiquidationUsd === null || stats.shortLiquidationUsd === null ?
       "Немає достовірних даних" : "LONG $" + formatNumber(stats.longLiquidationUsd, 2) +
       " / SHORT $" + formatNumber(stats.shortLiquidationUsd, 2),
