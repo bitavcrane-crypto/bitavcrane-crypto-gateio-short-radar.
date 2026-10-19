@@ -30,6 +30,8 @@ button:disabled { cursor: wait; opacity: .6; }
 .subtle-button { padding: 8px 10px; color: #aabbd0; background: #172232; border: 1px solid #2a3b50; font-size: 11px; }
 .subtle-button:hover { color: #edf2fa; background: #202e42; }
 .notice { margin: 0 0 16px; padding: 12px 14px; color: #ffd694; background: #392d1b; border: 1px solid #644a26; border-radius: 10px; font-size: 13px; }
+.signal-summary { margin: 0 0 14px; padding: 12px 14px; color: #a9bad0; background: #111a27; border: 1px solid #29384a; border-radius: 10px; font-size: 13px; font-weight: 700; }
+.signal-summary.has-signals { color: #ffb0a4; background: #321e24; border-color: #633b3b; }
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .card { min-width: 0; padding: 17px; border: 1px solid #253348; border-radius: 15px; background: linear-gradient(145deg, #141e2c, #101722 75%); box-shadow: 0 12px 30px #0002; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

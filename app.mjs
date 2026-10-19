@@ -1,4 +1,4 @@
-import { addPair, buildMarketData, removePair, transitionSignal, validatePairList } from "./core.mjs";
+import { addPair, buildMarketData, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
 import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
@@ -6,6 +6,7 @@ const PAIR_KEY = "gate-short-radar-pairs";
 const POLL_MS = 60000;
 const MAX_EVENTS = 12;
 const cardsNode = document.getElementById("cards");
+const signalSummaryNode = document.getElementById("signal-summary");
 const noticeNode = document.getElementById("notice");
 const connectionNode = document.getElementById("connection");
 const eventList = document.getElementById("event-list");
@@ -13,8 +14,10 @@ const pairInput = document.getElementById("pair-input");
 let contracts = [];
 let pairs = loadPairs();
 let models = {};
+let pairErrors = {};
 let events = [];
 let busy = false;
+let lastSuccessfulUpdate = null;
 
 function loadPairs() {
   try {
@@ -60,7 +63,8 @@ function metric(label, value, quality) {
 }
 
 function score(label, value) {
-  return '<div class="score"><span>' + label + '</span><strong>' + value + "/100</strong></div>";
+  return '<div class="score"><span>' + label + '</span><strong>' +
+    (typeof value === "number" && Number.isFinite(value) ? value + "/100" : "Немає даних") + "</strong></div>";
 }
 
 function displayState(model) {
@@ -75,7 +79,9 @@ function renderCard(pair) {
     return '<article class="card"><div class="card-head"><div><h2 class="pair-name">' +
       escapeHtml(pair) + '</h2><p class="price">Очікування першого оновлення</p></div>' +
       '<button class="remove-button" type="button" data-remove="' + escapeHtml(pair) + '" aria-label="Видалити ' +
-      escapeHtml(pair) + '">✕</button></div><span class="state incomplete">NO DATA</span></article>';
+      escapeHtml(pair) + '">✕</button></div><span class="state incomplete">Дані недоступні</span>' +
+      '<p class="why"><strong>Чому?</strong> ' + escapeHtml(pairErrors[pair] ||
+        "Очікуємо перше успішне оновлення. SHORT-сигнал не формується без перевірених даних.") + "</p></article>";
   }
   const data = model.data;
   const ticker = data.ticker;
@@ -108,6 +114,9 @@ function renderCard(pair) {
       ' · *Оцінка за закриттям 15m</p>' : '<p class="quality-note">Entry/Stop/TP з’являться лише для SHORT SETUP або SHORT ENTRY.</p>';
   const qualityNotes = [];
   if (model.quality !== "OK") qualityNotes.push("Якість оцінки: " + model.quality);
+  if (model.state.key === "incomplete" && model.quality === "STALE") {
+    qualityNotes.push("Показані останні отримані значення; нові дані недоступні");
+  }
   if (!data.indicators.rsi || !data.indicators.macd) qualityNotes.push("Історії свічок недостатньо для всіх індикаторів");
   return '<article class="card"><div class="card-head"><div><h2 class="pair-name">' + escapeHtml(pair) +
     '</h2><p class="price">Остання ціна: ' + formatNumber(ticker.last, 8) +
@@ -151,7 +160,14 @@ function renderCard(pair) {
 
 function render() {
   document.getElementById("pair-count").textContent = pairs.length + (pairs.length === 1 ? " пара" : " пар");
-  cardsNode.innerHTML = pairs.length ? pairs.map(renderCard).join("") :
+  const activeShortCount = pairs.filter(function (pair) {
+    return models[pair] && models[pair].state.key === "entry";
+  }).length;
+  signalSummaryNode.className = "signal-summary" + (activeShortCount ? " has-signals" : "");
+  signalSummaryNode.textContent = activeShortCount ?
+    "SHORT підтверджено для " + activeShortCount + (activeShortCount === 1 ? " монети." : " монет.") :
+    "Активних SHORT-сигналів немає. Моніторинг триває";
+  cardsNode.innerHTML = pairs.length ? sortPairsBySignal(pairs, models).map(renderCard).join("") :
     '<div class="empty">Список порожній. Додайте контракт Gate.io Futures.</div>';
   eventList.innerHTML = events.length ? events.map(function (event) {
     return "<li>" + escapeHtml(event) + "</li>";
@@ -161,6 +177,7 @@ function render() {
       const pair = button.getAttribute("data-remove");
       pairs = removePair(pairs, pair);
       delete models[pair];
+      delete pairErrors[pair];
       savePairs();
       render();
     });
@@ -175,6 +192,26 @@ function notifyChange(pair, oldState, newState) {
   if ("Notification" in window && Notification.permission === "granted") {
     try { new Notification("Gate.io SHORT Radar", { body: message }); } catch (error) { /* Browser notification may be unavailable. */ }
   }
+}
+
+function lastSuccessLabel() {
+  return "Останнє успішне оновлення: " +
+    (lastSuccessfulUpdate ? lastSuccessfulUpdate.toLocaleTimeString("uk-UA") : "немає");
+}
+
+function markPairUnavailable(pair, message) {
+  pairErrors[pair] = message;
+  if (!models[pair]) return;
+  models[pair] = Object.assign({}, models[pair], {
+    state: { key: "incomplete", label: "Дані недоступні", score: 0 },
+    quality: "STALE",
+    pumpScore: null,
+    exhaustionScore: null,
+    shortScore: null,
+    confidence: "Немає даних",
+    levels: null,
+    why: "Оновлення не вдалося (" + message + "). Показані останні значення застаріли й не є підтвердженням для входу."
+  });
 }
 
 async function mapLimited(items, limit, worker) {
@@ -230,26 +267,18 @@ async function scan() {
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (!signal.unchangedCandle && prior) notifyChange(pair, prior.state.key, signal.state.key);
         models[pair] = signal;
+        delete pairErrors[pair];
       } catch (error) {
         failures.push(pair + ": " + error.message);
-        if (models[pair]) {
-          models[pair] = Object.assign({}, models[pair], {
-            state: { key: "incomplete", label: "STALE", score: 0 },
-            quality: "STALE",
-            pumpScore: 0,
-            exhaustionScore: 0,
-            shortScore: 0,
-            levels: null,
-            why: "Оновлення не вдалося. Попередні дані застаріли й не є підтвердженням для входу."
-          });
-        }
+        markPairUnavailable(pair, error.message);
       }
     });
     connectionNode.textContent = failures.length ? "⚠️ Частина даних недоступна" : "Gate.io API · оновлено";
     connectionNode.className = "connection " + (failures.length ? "offline" : "online");
     noticeNode.hidden = failures.length === 0;
     noticeNode.textContent = failures.length ? "⚠️ Gate.io API недоступний для: " + failures.join("; ") : "";
-    document.getElementById("updated-at").textContent = "Оновлено " + new Date().toLocaleTimeString("uk-UA");
+    if (!failures.length) lastSuccessfulUpdate = new Date();
+    document.getElementById("updated-at").textContent = lastSuccessLabel();
     render();
   } catch (error) {
     connectionNode.textContent = "⚠️ Gate.io API недоступний";
@@ -257,18 +286,9 @@ async function scan() {
     noticeNode.hidden = false;
     noticeNode.textContent = "⚠️ Gate.io API недоступний. Перевірте мережу, DNS або CORS. Дані не замінено нулями. " + error.message;
     pairs.forEach(function (pair) {
-      if (models[pair]) {
-        models[pair] = Object.assign({}, models[pair], {
-          state: { key: "incomplete", label: "STALE", score: 0 },
-          quality: "STALE",
-          pumpScore: 0,
-          exhaustionScore: 0,
-          shortScore: 0,
-          levels: null,
-          why: "Оновлення не вдалося. Попередні дані застаріли й не є підтвердженням для входу."
-        });
-      }
+      markPairUnavailable(pair, error.message);
     });
+    document.getElementById("updated-at").textContent = lastSuccessLabel();
     render();
   } finally {
     busy = false;
@@ -289,10 +309,12 @@ document.getElementById("pair-form").addEventListener("submit", function (event)
     return;
   }
   pairs = result.list;
+  delete pairErrors[pairInput.value.trim().toUpperCase()];
   savePairs();
   pairInput.value = "";
   noticeNode.hidden = true;
   render();
+  document.getElementById("updated-at").textContent = lastSuccessLabel();
   scan();
 });
 
