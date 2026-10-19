@@ -163,6 +163,7 @@ test("primary price chart overlays a valid current ticker price without replacin
     escapeHtml: function (value) { return String(value); },
     formatNumber: function (value) { return String(value); }
   });
+  const currentTickerPrice = runInNewContext(functionSource("currentTickerPrice") + "\ncurrentTickerPrice;");
   const history = [{ values: [10, 11], color: "#fff", label: "Close", digits: 8, times: [100, 200] }];
   const svg = chartSvg(history, {
     label: "Price close", times: [100, 200], domainTimes: [100, 200], priceChart: true, currentPrice: 12
@@ -178,7 +179,12 @@ test("primary price chart overlays a valid current ticker price without replacin
   assert.doesNotMatch(chartSvg(history, {
     label: "Price close", times: [100, 200], domainTimes: [100, 200], priceChart: true, currentPrice: Infinity
   }), /data-live-price/);
-  assert.match(source, /ticker\.quality === "OK" && Number\.isFinite\(ticker\.last\)/);
+  assert.equal(currentTickerPrice({ data: { ticker: { quality: "OK", last: 12 } } }), 12);
+  assert.equal(currentTickerPrice({ data: { ticker: { quality: "STALE", last: 12 } } }), null);
+  assert.equal(currentTickerPrice({ data: { ticker: { quality: "OK", last: 0 } } }), null);
+  assert.equal(currentTickerPrice({ data: { ticker: { quality: "OK", last: Infinity } } }), null);
+  assert.match(source, /const currentPrice = currentTickerPrice\(model\)/);
+  assert.match(source, /const model = models\[pair\]/);
   assert.match(source, /priceChart: true, currentPrice: currentPrice/);
   assert.match(source, /window\.setInterval\(scan, POLL_MS\)/);
 });

@@ -244,6 +244,12 @@ function renderStrategyPanel(model) {
     " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
 }
 
+function currentTickerPrice(model) {
+  const ticker = model && model.data && model.data.ticker;
+  return ticker && ticker.quality === "OK" && Number.isFinite(ticker.last) && ticker.last > 0 ?
+    ticker.last : null;
+}
+
 function chartSvg(seriesList, options) {
   const currentPrice = options.priceChart && typeof options.currentPrice === "number" &&
     Number.isFinite(options.currentPrice) && options.currentPrice > 0 ? options.currentPrice : null;
@@ -389,9 +395,7 @@ function renderIndicatorVisualization(pair) {
   }
   const indicators = view.indicators;
   const model = models[pair];
-  const ticker = model && model.data && model.data.ticker;
-  const currentPrice = ticker && ticker.quality === "OK" && Number.isFinite(ticker.last) && ticker.last > 0 ?
-    ticker.last : null;
+  const currentPrice = currentTickerPrice(model);
   const chartCandles = view.candles.slice(-48);
   const chartTimes = chartCandles.map(function (candle) { return candle.time; });
   const chartStartTime = chartTimes[0];
