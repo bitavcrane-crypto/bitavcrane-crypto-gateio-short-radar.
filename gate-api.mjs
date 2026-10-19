@@ -54,6 +54,15 @@ export async function fetchContractStats(contract) {
   return rows;
 }
 
+export async function fetchOrderBook(contract) {
+  const query = "?contract=" + encodeURIComponent(contract) + "&limit=20&with_id=true";
+  const book = await request("/futures/usdt/order_book" + query, CACHE_MS);
+  if (!book || typeof book !== "object" || Array.isArray(book)) {
+    throw new Error("Некоректна книга заявок " + contract);
+  }
+  return book;
+}
+
 export function normalizeTicker(row, contract) {
   if (!row || row.contract !== contract) {
     return { quality: "CONFLICT", last: null, mark: null, index: null, funding: null, volume24h: null };
@@ -79,7 +88,48 @@ export function normalizeContract(row) {
   return {
     name: row.name,
     active: typeof row.status === "string" && row.status.toLowerCase() === "trading",
-    fundingIntervalSeconds: interval !== null && interval > 0 ? interval : null
+    fundingIntervalSeconds: interval !== null && interval > 0 ? interval : null,
+    quantoMultiplier: numeric(row.quanto_multiplier) > 0 ? numeric(row.quanto_multiplier) : null
+  };
+}
+
+export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
+  const levels = function (items, isBid) {
+    if (!Array.isArray(items)) return [];
+    return items.map(function (level) {
+      const price = numeric(Array.isArray(level) ? level[0] : level && level.p);
+      const size = numeric(Array.isArray(level) ? level[1] : level && level.s);
+      return price !== null && price > 0 && size !== null && size > 0 ?
+        { price: price, size: size, bid: isBid } : null;
+    }).filter(Boolean);
+  };
+  const bids = levels(book && book.bids, true).sort(function (a, b) { return b.price - a.price; });
+  const asks = levels(book && book.asks, false).sort(function (a, b) { return a.price - b.price; });
+  const multiplier = numeric(contractMultiplier);
+  if (!bids.length || !asks.length || multiplier === null || multiplier <= 0) {
+    return { quality: "INCOMPLETE", bestBid: null, bestAsk: null, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAtMs || null };
+  }
+  const bestBid = bids[0].price;
+  const bestAsk = asks[0].price;
+  if (bestAsk <= bestBid) {
+    return { quality: "SUSPECT", bestBid: bestBid, bestAsk: bestAsk, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAtMs || null };
+  }
+  const midpoint = (bestBid + bestAsk) / 2;
+  const depthWithinHalfPercent = function (items) {
+    return items.reduce(function (sum, level) {
+      if (Math.abs(level.price / midpoint - 1) > 0.005) return sum;
+      return sum + level.price * level.size * multiplier;
+    }, 0);
+  };
+  const bidDepth = depthWithinHalfPercent(bids);
+  const askDepth = depthWithinHalfPercent(asks);
+  return {
+    quality: "OK",
+    bestBid: bestBid,
+    bestAsk: bestAsk,
+    spreadPercent: (bestAsk / bestBid - 1) * 100,
+    depthUsd: Math.min(bidDepth, askDepth),
+    fetchedAt: fetchedAtMs || Date.now()
   };
 }
 

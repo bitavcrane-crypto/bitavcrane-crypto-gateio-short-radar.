@@ -1,5 +1,5 @@
 import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
-import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
+import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
@@ -9,6 +9,7 @@ const PAIR_KEY = "gate-short-radar-pairs";
 const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
 const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
 const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
+const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
 };
@@ -30,6 +31,7 @@ let events = [];
 let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
 let visualizationData = {};
+let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
 let lastSuccessfulUpdate = null;
 
@@ -100,6 +102,15 @@ function loadPairs() {
     return Array.isArray(value) ? value : DEFAULT_PAIRS.slice();
   } catch (error) {
     return DEFAULT_PAIRS.slice();
+  }
+}
+
+function loadMinimumRiskReward() {
+  try {
+    const value = Number(localStorage.getItem(MINIMUM_RISK_REWARD_KEY));
+    return Number.isFinite(value) && value >= 1 && value <= 5 ? value : 1.5;
+  } catch (error) {
+    return 1.5;
   }
 }
 
@@ -177,6 +188,31 @@ function renderConfirmation(model) {
         confirmation.state === "confirmed" ? "залишається" : "не усунутий") + '</p>' +
     '<div class="confirmation-indicators">' + indicators + '</div><p class="confirmation-reasons"><strong>Чому вхід не підтверджений?</strong> ' +
     escapeHtml(reasons) + "</p></section>";
+}
+
+function renderStrategyPanel(model) {
+  const strategy = model.strategy;
+  if (!strategy) return "";
+  const matrix = ["15m", "1h", "4h"].map(function (interval) {
+    const row = strategy.matrix[interval];
+    return '<div class="strategy-matrix-row"><strong>' + interval + '</strong><span>' +
+      escapeHtml(row.label) + "</span><small>Ціна " + formatPercent(model.data.changes[interval]) +
+      " · OI " + formatPercent(model.data.oiChanges[interval]) + "</small></div>";
+  }).join("");
+  const scoreReasons = strategy.scoreReasons.length ? strategy.scoreReasons.join(" · ") : "Підтвердження для балів відсутні";
+  const missing = strategy.missingScoreData.length ? strategy.missingScoreData.join(" · ") : "Немає";
+  const blockers = strategy.blockers.length ? strategy.blockers.join(" · ") : "Блокувань немає";
+  const setup = strategy.setup ? strategy.setup.type + " · рівень " + formatNumber(strategy.setup.level, 8) :
+    "Підтвердженого пробою / ретесту немає";
+  const updateTime = model.data.orderBook && model.data.orderBook.fetchedAt ?
+    new Date(model.data.orderBook.fetchedAt).toLocaleTimeString("uk-UA") : "немає";
+  return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
+    escapeHtml(setup) + '</strong><span>' + (strategy.allowed ? "SHORT ENTRY дозволено" : "NO TRADE") + "</span></div>" +
+    '<div class="strategy-matrix">' + matrix + "</div><p><strong>SHORT SCORE " + strategy.score +
+    "/100:</strong> " + escapeHtml(scoreReasons) + "</p><p><strong>Відсутні дані:</strong> " +
+    escapeHtml(missing) + "</p><p><strong>Блокування:</strong> " + escapeHtml(blockers) +
+    "</p><p class=\"strategy-time\">Книга заявок оновлена: " + escapeHtml(updateTime) +
+    " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
 }
 
 function chartSvg(seriesList, options) {
@@ -338,6 +374,21 @@ function renderIndicatorVisualization(pair) {
     '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
     '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
     "</h4>" + kdjContent + "</section></div>" +
+    (model && model.data ? (function () {
+      const recent = model.data.candles["15m"].slice(-40);
+      const oiHistory = model.data.stats.history.slice(-40);
+      return '<div class="indicator-chart-grid market-chart-grid">' +
+        '<section class="indicator-chart-card"><h4>Ціна · 15m</h4>' +
+        chartSvg([{ values: recent.map(function (candle) { return candle.close; }), color: "#f3f5f7" }],
+          { label: "Ціна close, 15m" }) + "</section>" +
+        '<section class="indicator-chart-card"><h4>Обсяг · 15m</h4>' +
+        chartSvg([{ values: recent.map(function (candle) { return candle.volume; }), color: "#e8b86d" }],
+          { label: "Обсяг контрактів, 15m" }) + "</section>" +
+        '<section class="indicator-chart-card"><h4>Open Interest · 5m історія</h4>' +
+        chartSvg([{ values: oiHistory.map(function (row) { return row.openInterest; }), color: "#49d4a5" }],
+          { label: "Open Interest з Gate.io contract stats" }) + "</section></div>" +
+        renderStrategyPanel(model);
+    })() : "") +
     '<p class="visualization-summary">' + escapeHtml(summary) +
     (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
       " Перекупленість сама по собі не є умовою SHORT; підтвердження ціною залишається необхідним.") + "</p>";
@@ -347,7 +398,7 @@ function renderVisualizationControl(pair) {
   const open = openVisualizations.has(pair);
   const id = "visualization-" + pair.replace(/[^a-zA-Z0-9_-]/g, "-");
   return '<button class="visualization-toggle" type="button" data-visualization="' + escapeHtml(pair) +
-    '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація індикаторів</button>' +
+    '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація</button>' +
     '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") + '>' +
     (open ? renderIndicatorVisualization(pair) : "") + '</div>';
 }
@@ -418,6 +469,13 @@ function renderCard(pair) {
     metric("Δ OI · 15m / 1h / 4h", formatPercent(data.oiChanges["15m"]) + " / " +
       formatPercent(data.oiChanges["1h"]) + " / " + formatPercent(data.oiChanges["4h"]),
       stats.quality === "OK" && oiChangesComplete ? "OK" : "INCOMPLETE") +
+    metric("Price × OI · 15m / 1h / 4h", model.strategy ?
+      model.strategy.matrix["15m"].label + " / " + model.strategy.matrix["1h"].label + " / " +
+        model.strategy.matrix["4h"].label : "Немає даних",
+      model.strategy && model.strategy.dataReady ? "OK" : "INCOMPLETE") +
+    metric("Спред / глибина книги", data.orderBook && data.orderBook.quality === "OK" ?
+      formatNumber(data.orderBook.spreadPercent, 3) + "% / $" + formatNumber(data.orderBook.depthUsd, 0) :
+      "NO TRADE · дані недоступні", data.orderBook ? data.orderBook.quality : "NO DATA") +
     metric("Funding / період", funding + " / " + interval,
       typeof ticker.funding !== "number" ? "NO DATA" : data.fundingIntervalSeconds ? "OK" : "INCOMPLETE") +
     metric("Ліквідації · 5m USD", stats.longLiquidationUsd === null || stats.shortLiquidationUsd === null ?
@@ -433,7 +491,8 @@ function renderCard(pair) {
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
-    '</div>' + levels + renderConfirmation(model) + '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
+    '</div>' + levels + renderStrategyPanel(model) + renderConfirmation(model) +
+    '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
     renderVisualizationControl(pair) + "</article>";
 }
@@ -662,16 +721,21 @@ async function scan() {
         const responses = await Promise.all([
           fetchCandles(pair, "5m"), fetchCandles(pair, "15m"),
           fetchCandles(pair, "1h"), fetchCandles(pair, "4h"),
-          fetchContractStats(pair)
+          fetchContractStats(pair),
+          fetchOrderBook(pair).catch(function () { return { quality: "NO DATA" }; })
         ]);
         const ticker = normalizeTicker(tickerMap.get(pair), pair);
         const nowSeconds = Math.floor(Date.now() / 1000);
         const stats = normalizeContractStats(responses[4], nowSeconds);
+        const orderBook = responses[5].quality === "NO DATA" ? responses[5] :
+          normalizeOrderBook(responses[5], contractMap.get(pair) ? contractMap.get(pair).quantoMultiplier : null, Date.now());
         const model = buildMarketData({
           candles: { "5m": responses[0], "15m": responses[1], "1h": responses[2], "4h": responses[3] },
           ticker: ticker,
           stats: stats,
+          orderBook: orderBook,
           fundingIntervalSeconds: contractMap.get(pair) ? contractMap.get(pair).fundingIntervalSeconds : null,
+          minimumRiskReward: minimumRiskReward,
           nowSeconds: nowSeconds
         });
         const prior = models[pair];
@@ -766,6 +830,26 @@ document.getElementById("reset-visualization").addEventListener("click", functio
   }
   syncVisualizationControls();
   render();
+});
+
+const riskRewardInput = document.getElementById("minimum-risk-reward");
+riskRewardInput.value = String(minimumRiskReward);
+riskRewardInput.addEventListener("change", function () {
+  const value = Number(riskRewardInput.value);
+  if (!Number.isFinite(value) || value < 1 || value > 5) {
+    riskRewardInput.value = String(minimumRiskReward);
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Мінімальний Reward/Risk має бути від 1 до 5.";
+    return;
+  }
+  minimumRiskReward = value;
+  try {
+    localStorage.setItem(MINIMUM_RISK_REWARD_KEY, String(value));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Параметр Reward/Risk не вдалося зберегти у localStorage.";
+  }
+  scan();
 });
 
 syncConfirmationControls();
