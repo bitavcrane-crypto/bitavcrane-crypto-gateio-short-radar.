@@ -185,7 +185,7 @@ function renderIndicatorVisualization(pair, model) {
       });
   const obv = indicators.obv;
   const obvContent = !Number.isFinite(obv.value) || !Number.isFinite(obv.change) ?
-    '<p class="chart-empty">Недостатньо даних для OBV.</p>' :
+    '<p class="chart-empty">' + (obv.volumeAvailable ? "Недостатньо даних для OBV." : "Дані недоступні для OBV · немає обсягу свічок.") + "</p>" :
       '<p class="chart-summary">OBV Δ(' + obv.lookback + '): <strong>' + formatNumber(obv.change, 2) +
         '</strong> · напрямок: ' + directionLabel(obv.direction) + '</p>' +
       chartSvg([{ values: obv.values, color: "#e8b86d" }], { label: "OBV зміна за lookback" }) +
@@ -196,7 +196,8 @@ function renderIndicatorVisualization(pair, model) {
     '<p class="chart-empty">Недостатньо даних для EMA ' + ema.slowPeriod + '.</p>' :
       '<p class="chart-summary">Close ' + formatNumber(ema.close, 8) + ' · EMA ' + ema.fastPeriod + " " +
         formatNumber(ema.fast, 8) + " · EMA " + ema.slowPeriod + " " + formatNumber(ema.slow, 8) +
-        " · " + ema.position + " · " + directionLabel(ema.direction) + "</p>" +
+        " · " + ema.position + " · напрямок EMA " + ema.fastPeriod + ": " + directionLabel(ema.fastDirection) +
+        ", EMA " + ema.slowPeriod + ": " + directionLabel(ema.slowDirection) + "</p>" +
       chartSvg([
         { values: ema.fastValues, color: "#49d4a5" },
         { values: ema.slowValues, color: "#f18c8c" }
@@ -226,7 +227,7 @@ function renderVisualizationControl(pair) {
   const id = "visualization-" + pair.replace(/[^a-zA-Z0-9_-]/g, "-");
   return '<button class="visualization-toggle" type="button" data-visualization="' + escapeHtml(pair) +
     '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація індикаторів</button>' +
-    '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") +
+    '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") + '>' +
     (open ? renderIndicatorVisualization(pair, models[pair]) : "") + '</div>';
 }
 

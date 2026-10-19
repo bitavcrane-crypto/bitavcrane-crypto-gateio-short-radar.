@@ -33,6 +33,19 @@ test("visualizations use each contract's own closed candles and current settings
   assert.equal(btc.candles.at(-1).time + 900, nowSeconds);
 });
 
+test("KDJ visualization applies the configured MA1 and MA2 lengths", function () {
+  const nowSeconds = 1701000000;
+  const rows = candles(50, nowSeconds, 100, 1);
+  const custom = Object.assign({}, DEFAULT_CONFIRMATION_SETTINGS, {
+    kdj: Object.assign({}, DEFAULT_CONFIRMATION_SETTINGS.kdj, { ma1: 2, ma2: 5 })
+  });
+  const standard = buildIndicatorVisualization(rows, DEFAULT_CONFIRMATION_SETTINGS, nowSeconds);
+  const configured = buildIndicatorVisualization(rows, custom, nowSeconds);
+  assert.equal(configured.indicators.kdj.ma1, 2);
+  assert.equal(configured.indicators.kdj.ma2, 5);
+  assert.notDeepEqual(configured.indicators.kdj.kValues, standard.indicators.kdj.kValues);
+});
+
 test("visualizations distinguish unavailable data from insufficient history", function () {
   const nowSeconds = 1701000000;
   const missing = buildIndicatorVisualization([], DEFAULT_CONFIRMATION_SETTINGS, nowSeconds);

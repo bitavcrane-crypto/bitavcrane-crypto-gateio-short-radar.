@@ -23,7 +23,9 @@ function rankCorrelation(window) {
 function rollingAverage(values, period) {
   return values.map(function (_, index) {
     if (index + 1 < period) return null;
-    return values.slice(index + 1 - period, index + 1).reduce(function (sum, value) {
+    const window = values.slice(index + 1 - period, index + 1);
+    if (window.some(function (value) { return !finite(value); })) return null;
+    return window.reduce(function (sum, value) {
       return sum + value;
     }, 0) / period;
   });
@@ -77,7 +79,7 @@ function indicatorSeries(candles, settings) {
     return finite(value) && finite(d[index]) ? 3 * value - 2 * d[index] : null;
   });
 
-  return { rci: rci, obv: obvSeries, fastEma: fastEma, slowEma: slowEma, k: k, d: d, j: j };
+  return { rci: rci, obv: obvSeries, obvVolumeAvailable: hasVolume, fastEma: fastEma, slowEma: slowEma, k: k, d: d, j: j };
 }
 
 function latestDirection(series) {
@@ -141,12 +143,14 @@ export function buildIndicatorVisualization(candles, settings, nowSeconds) {
       obv: {
         lookback: settings.obv.lookback, values: tail(series.obv), value: obvValue,
         change: finite(obvValue) && finite(obvPrevious) ? obvValue - obvPrevious : null,
-        direction: latestDirection(series.obv)
+        direction: latestDirection(series.obv), volumeAvailable: series.obvVolumeAvailable
       },
       ema: {
         fastPeriod: settings.ema.fast, slowPeriod: settings.ema.slow, close: close,
         fast: fast, slow: slow, fastValues: tail(series.fastEma), slowValues: tail(series.slowEma),
         direction: emaDirection,
+        fastDirection: latestDirection(series.fastEma),
+        slowDirection: latestDirection(series.slowEma),
         position: fast === null || slow === null ? "Недостатньо даних" :
           close > fast && fast > slow ? "Ціна вище обох EMA" :
             close < fast && fast < slow ? "Ціна нижче обох EMA" : "Ціна між EMA або лінії перетнулися"
