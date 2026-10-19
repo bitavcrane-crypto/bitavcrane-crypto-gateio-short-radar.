@@ -112,9 +112,26 @@ test("visualization crosshair shares pointer interaction across charts and reset
   assert.match(source, /panel\.addEventListener\("pointerdown"/);
   assert.match(source, /panel\.addEventListener\("pointermove"/);
   assert.match(source, /controller\.selectAt\(chartIndex/);
+  assert.match(source, /positionAtClientX\(event\.clientX/);
+  assert.match(source, /data-crosshair-horizontal/);
+  assert.match(source, /valueAtPosition\(update\.values\[0\]/);
   assert.match(source, /delete visualizationCrosshairTimes\[pair\]/);
   assert.match(source, /data-chart-time/);
   assert.match(stylesheet, /touch-action:\s*none/);
+});
+
+test("SVG charts render both crosshair axes inside their plotted data bounds", function () {
+  const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
+    escapeHtml: function (value) { return String(value); }
+  });
+  const svg = chartSvg([
+    { values: [10, 20], color: "#fff", label: "close", digits: 2, times: [100, 200] }
+  ], { label: "Close", times: [100, 200], domainTimes: [100, 200] });
+  assert.match(svg, /data-crosshair-horizontal/);
+  assert.match(svg, /data-crosshair-line/);
+  assert.match(svg, /data-chart-viewbox-width="440"/);
+  assert.match(svg, /data-chart-plot-start="5" data-chart-plot-end="325"/);
+  assert.match(svg, /data-chart-min="9\.2" data-chart-max="20\.8"/);
 });
 
 test("partial API failures preserve other timeframes and missing contracts never delete saved pairs", async function () {

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createCrosshairController, formatCrosshairTime, valuesAtTimestamp } from "../chart-crosshair.mjs";
+import {
+  createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition, valuesAtTimestamp
+} from "../chart-crosshair.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS } from "../indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
 import { DEFAULT_VISUALIZATION_INTERVAL, getVisualizationInterval, setVisualizationInterval } from "../visualization-state.mjs";
@@ -215,4 +217,16 @@ test("crosshair values never interpolate missing history and the bottom label sh
   assert.deepEqual(valuesAtTimestamp(series, timestamp), [null, null, 12]);
   assert.equal(formatCrosshairTime(timestamp), "2023-11-14 22:28:20 UTC");
   assert.equal(formatCrosshairTime(null), "Немає даних");
+});
+
+test("crosshair maps pointer coordinates through the SVG plot area and positions its value line", function () {
+  const bounds = { left: 100, width: 220 };
+  assert.equal(positionAtClientX(100 + (5 / 440) * 220, bounds, 440, 5, 325), 0);
+  assert.equal(positionAtClientX(100 + (165 / 440) * 220, bounds, 440, 5, 325), 0.5);
+  assert.equal(positionAtClientX(100 + (325 / 440) * 220, bounds, 440, 5, 325), 1);
+  assert.equal(positionAtClientX(100, { left: 100, width: 0 }, 440, 5, 325), null);
+  assert.equal(valueAtPosition(50, 0, 100, 5, 99), 52);
+  assert.equal(valueAtPosition(100, 0, 100, 5, 99), 5);
+  assert.equal(valueAtPosition(null, 0, 100, 5, 99), null);
+  assert.equal(valueAtPosition(101, 0, 100, 5, 99), null);
 });
