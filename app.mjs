@@ -2,6 +2,7 @@ import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySign
 import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
+import { createCrosshairController, formatCrosshairTime } from "./chart-crosshair.mjs";
 import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
@@ -31,6 +32,7 @@ let events = [];
 let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
 let visualizationData = {};
+let visualizationCrosshairTimes = {};
 let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
 let lastSuccessfulUpdate = null;
@@ -243,39 +245,72 @@ function chartSvg(seriesList, options) {
   const allValues = seriesList.reduce(function (values, series) {
     return values.concat(series.values.filter(function (value) { return typeof value === "number" && Number.isFinite(value); }));
   }, []);
+  if (!allValues.length) return '<p class="chart-empty">Немає даних для графіка</p>';
   if (allValues.length < 2) return '<p class="chart-empty">Недостатньо даних для графіка</p>';
   const min = options.min === undefined ? Math.min.apply(null, allValues) : options.min;
   const max = options.max === undefined ? Math.max.apply(null, allValues) : options.max;
   const range = max === min ? Math.abs(max) * 0.1 || 1 : max - min;
   const low = options.min === undefined ? min - range * 0.08 : min;
   const high = options.max === undefined ? max + range * 0.08 : max;
-  const width = 320;
+  const width = 440;
   const height = 104;
   const pad = 5;
-  const x = function (index, length) { return pad + index * (width - pad * 2) / Math.max(1, length - 1); };
+  const plotEnd = 330;
+  const x = function (time, times) {
+    const first = options.domainTimes[0];
+    const last = options.domainTimes[options.domainTimes.length - 1];
+    const fraction = first === last ? 0.5 : (time - first) / (last - first);
+    return pad + fraction * (plotEnd - pad * 2);
+  };
   const y = function (value) { return height - pad - ((value - low) / (high - low)) * (height - pad * 2); };
   const backgrounds = options.zones ? options.zones.map(function (zone) {
-    return '<rect x="0" y="' + y(zone.to) + '" width="' + width + '" height="' +
+    return '<rect x="0" y="' + y(zone.to) + '" width="' + plotEnd + '" height="' +
       Math.max(0, y(zone.from) - y(zone.to)) + '" fill="' + zone.color + '"/>';
   }).join("") : "";
   const guides = (options.guides || []).map(function (value) {
-    return '<line x1="0" y1="' + y(value) + '" x2="' + width + '" y2="' + y(value) +
+    return '<line x1="0" y1="' + y(value) + '" x2="' + plotEnd + '" y2="' + y(value) +
       '" stroke="#4c5b6c" stroke-dasharray="4 4"/>';
   }).join("");
   const markers = (options.markers || []).map(function (index) {
-    const position = x(index, options.markerLength || 1);
+    const markerTimes = options.times || options.domainTimes;
+    const position = x(markerTimes[index], options.domainTimes);
     return '<line x1="' + position + '" y1="0" x2="' + position + '" y2="' + height +
       '" stroke="#ff958c" stroke-dasharray="3 3"/>';
   }).join("");
   const paths = seriesList.map(function (series) {
-    const points = series.values.map(function (value, index) {
-      return typeof value === "number" && Number.isFinite(value) ? x(index, series.values.length) + "," + y(value) : null;
-    }).filter(Boolean);
-    return points.length > 1 ? '<polyline fill="none" stroke="' + series.color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="' +
-      points.join(" ") + '"/>' : "";
+    const times = series.times || options.times;
+    const pathsForSeries = [];
+    let points = [];
+    series.values.forEach(function (value, index) {
+      const position = times && times[index] !== undefined ? x(times[index], options.domainTimes) : null;
+      if (typeof value === "number" && Number.isFinite(value) && position !== null &&
+          position >= pad && position <= plotEnd - pad) {
+        points.push(position + "," + y(value));
+      } else if (points.length) {
+        if (points.length > 1) pathsForSeries.push(points.join(" "));
+        points = [];
+      }
+    });
+    if (points.length > 1) pathsForSeries.push(points.join(" "));
+    return pathsForSeries.map(function (line) {
+      return '<polyline fill="none" stroke="' + series.color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="' +
+        line + '"/>';
+    }).join("");
   }).join("");
-  return '<svg class="indicator-chart-svg" viewBox="0 0 320 104" role="img" aria-label="' +
-    escapeHtml(options.label) + '" preserveAspectRatio="none">' + backgrounds + guides + markers + paths + "</svg>";
+  const seriesData = seriesList.map(function (series) {
+    return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits };
+  });
+  const valueLabels = seriesList.map(function (series, index) {
+    return '<text data-crosshair-value="' + index + '" fill="' + series.color + '" x="' + (width - 3) +
+      '" y="' + (12 + index * 12) + '" text-anchor="end">' + escapeHtml(series.label || "Значення") + ": —</text>";
+  }).join("");
+  return '<svg class="indicator-chart-svg" viewBox="0 0 440 104" role="img" aria-label="' +
+    escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-times=\'' +
+    JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
+    backgrounds + guides + markers + paths +
+    '<line data-crosshair-line x1="0" y1="0" x2="0" y2="' + height +
+    '" stroke="#ffffff" stroke-width="1" stroke-dasharray="2 2" visibility="hidden" pointer-events="none"/>' +
+    valueLabels + "</svg>";
 }
 
 function directionLabel(value) {
@@ -332,6 +367,9 @@ function renderIndicatorVisualization(pair) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
   }
   const indicators = view.indicators;
+  const chartTimes = view.candles.slice(-48).map(function (candle) { return candle.time; });
+  const chartStartTime = chartTimes[0];
+  const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
   const rciColors = ["#77c8ff", "#49d4a5", "#f18c8c"];
   const rciContent = '<p class="chart-summary">' + rci.lines.map(function (line) {
@@ -340,20 +378,24 @@ function renderIndicatorVisualization(pair) {
   }).join(" · ") + " · шкала −100…+100 · " +
     (rci.possibleReversalDown ? "можливий розворот униз" : "розворот униз не підтверджено") + "</p>" +
     chartSvg(rci.lines.map(function (line, index) {
-      return { values: line.values, color: rciColors[index % rciColors.length] };
+      return {
+        values: line.values, color: rciColors[index % rciColors.length],
+        label: "RCI " + line.period, digits: 1, times: chartTimes
+      };
     }), {
       min: -100, max: 100, guides: [-80, 0, 80], label: "RCI periods " + rci.periods.join(", "),
+      times: chartTimes, domainTimes: chartTimes,
       zones: [{ from: 80, to: 100, color: "#633b3b66" }, { from: -100, to: -80, color: "#24574366" }]
     }) + '<p class="chart-footnote">Дивергенція RCI не визначається: надійного алгоритму в модулі немає.</p>';
   const obv = indicators.obv;
   const obvContent = !obv.volumeAvailable ?
-    '<p class="chart-empty">Дані тимчасово недоступні для OBV · немає повного обсягу.</p>' :
+    '<p class="chart-empty">Немає даних для OBV · відсутній повний обсяг.</p>' :
       '<p class="chart-summary">Зміна OBV (' + obv.lookback + ' свічок): <strong>' +
         formatNumber(obv.change, 2) + '</strong> · напрямок: ' + directionLabel(obv.direction) + "</p>" +
       chartSvg([
-        { values: obv.values, color: "#e8b86d" },
-        { values: obv.averageValues, color: "#77c8ff" }
-      ], { label: "OBV та SMA " + obv.lookback }) +
+        { values: obv.values, color: "#e8b86d", label: "OBV", digits: 2, times: chartTimes },
+        { values: obv.averageValues, color: "#77c8ff", label: "SMA " + obv.lookback, digits: 2, times: chartTimes }
+      ], { label: "OBV та SMA " + obv.lookback, times: chartTimes, domainTimes: chartTimes }) +
       '<p class="chart-footnote">OBV розраховано за напрямком close; лінія згладжування — SMA(' +
       obv.lookback + "). Абсолютний OBV не є самостійним SHORT-сигналом.</p>";
   const ema = indicators.ema;
@@ -365,9 +407,14 @@ function renderIndicatorVisualization(pair) {
     (ema.crosses.length ? ema.crosses.map(function (cross) {
       return cross.periods.join("/") + " " + cross.direction;
     }).join(", ") : "немає") + "</p>" +
-    chartSvg([{ values: ema.closeValues, color: "#f3f5f7" }].concat(ema.lines.map(function (line, index) {
-      return { values: line.values, color: emaColors[index % emaColors.length] };
-    })), { label: "Ціна close та EMA " + ema.periods.join(", ") }) +
+    chartSvg([{
+      values: ema.closeValues, color: "#f3f5f7", label: "Close", digits: 8, times: chartTimes
+    }].concat(ema.lines.map(function (line, index) {
+      return {
+        values: line.values, color: emaColors[index % emaColors.length],
+        label: "EMA " + line.period, digits: 8, times: chartTimes
+      };
+    })), { label: "Ціна close та EMA " + ema.periods.join(", "), times: chartTimes, domainTimes: chartTimes }) +
     (ema.lines.some(function (line) { return !Number.isFinite(line.value); }) ?
       '<p class="chart-footnote">Недостатньо історії для EMA ' + ema.lines.filter(function (line) {
         return !Number.isFinite(line.value);
@@ -381,10 +428,10 @@ function renderIndicatorVisualization(pair) {
         (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) +
         " · можливе виснаження: " + (kdj.possibleExhaustion ? "так" : "не визначено") + "</p>" +
       chartSvg([
-        { values: kdj.kValues, color: "#77c8ff" },
-        { values: kdj.dValues, color: "#f18c8c" },
-        { values: kdj.jValues, color: "#c59bff" }
-      ], { guides: [20, 50, 80], label: "KDJ" });
+        { values: kdj.kValues, color: "#77c8ff", label: "K", digits: 1, times: chartTimes },
+        { values: kdj.dValues, color: "#f18c8c", label: "D", digits: 1, times: chartTimes },
+        { values: kdj.jValues, color: "#c59bff", label: "J", digits: 1, times: chartTimes }
+      ], { guides: [20, 50, 80], label: "KDJ", times: chartTimes, domainTimes: chartTimes });
   const model = models[pair];
   const shortTermTurn = ema.direction === "bearish" || kdj.cross === "bearish" ||
     rci.possibleReversalDown || kdj.possibleExhaustion ||
@@ -404,24 +451,39 @@ function renderIndicatorVisualization(pair) {
     '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
     "</h4>" + kdjContent + "</section></div>" +
     (model && model.data ? (function () {
-      const recent = model.data.candles["15m"].slice(-40);
-      const oiHistory = model.data.stats.history.slice(-40);
+      const recent = view.candles.slice(-40);
+      const recentTimes = recent.map(function (candle) { return candle.time; });
+      const oiHistory = model.data.stats.history.filter(function (row) {
+        return row.time >= chartStartTime && row.time <= chartEndTime;
+      });
       return '<div class="indicator-chart-grid market-chart-grid">' +
-        '<section class="indicator-chart-card"><h4>Ціна · 15m</h4>' +
-        chartSvg([{ values: recent.map(function (candle) { return candle.close; }), color: "#f3f5f7" }],
+        '<section class="indicator-chart-card"><h4>Ціна · ' + interval + "</h4>" +
+        chartSvg([{
+          values: recent.map(function (candle) { return candle.close; }),
+          color: "#f3f5f7", label: "Close", digits: 8, times: recentTimes
+        }],
           {
-            label: "Ціна close, 15m",
+            label: "Ціна close, " + interval, times: recentTimes, domainTimes: chartTimes,
+            markers: recentTimes.length ? [recentTimes.length - 1] : [],
             guides: model.strategy.setup ? [model.strategy.setup.level] : [],
-            markers: recent.length ? [recent.length - 1] : [],
-            markerLength: recent.length
           }) + "</section>" +
-        '<section class="indicator-chart-card"><h4>Обсяг · 15m</h4>' +
-        chartSvg([{ values: recent.map(function (candle) { return candle.volume; }), color: "#e8b86d" }],
-          { label: "Обсяг контрактів, 15m" }) + "</section>" +
+        '<section class="indicator-chart-card"><h4>Обсяг · ' + interval + "</h4>" +
+        chartSvg([{
+          values: recent.map(function (candle) { return candle.volume; }),
+          color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
+        }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Open Interest · 5m історія</h4>' +
-        chartSvg([{ values: oiHistory.map(function (row) { return row.openInterest; }), color: "#49d4a5" }],
-        { label: "Open Interest з Gate.io contract stats" }) + "</section></div>";
+        chartSvg([{
+          values: oiHistory.map(function (row) { return row.openInterest; }),
+          color: "#49d4a5", label: "OI", digits: 2,
+          times: oiHistory.map(function (row) { return row.time; })
+        }], {
+          label: "Open Interest з Gate.io contract stats",
+          times: chartTimes, domainTimes: chartTimes
+        }) + "</section></div>";
     })() : "") +
+    '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
+    escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
     (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
       " Перекупленість сама по собі не є умовою SHORT; підтвердження ціною залишається необхідним.") + "</p>";
@@ -432,8 +494,84 @@ function renderVisualizationControl(pair) {
   const id = "visualization-" + pair.replace(/[^a-zA-Z0-9_-]/g, "-");
   return '<button class="visualization-toggle" type="button" data-visualization="' + escapeHtml(pair) +
     '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація</button>' +
-    '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") + '>' +
+    '<div class="visualization-panel" id="' + id + '" data-chart-pair="' + escapeHtml(pair) + '"' +
+      (open ? "" : " hidden") + '>' +
     (open ? renderIndicatorVisualization(pair) : "") + '</div>';
+}
+
+function bindSynchronizedCrosshair(panel, pair) {
+  const chartElements = Array.from(panel.querySelectorAll(".indicator-chart-svg"));
+  if (!chartElements.length) return;
+  const charts = chartElements.map(function (svg) {
+    return {
+      times: JSON.parse(svg.getAttribute("data-chart-times") || "[]"),
+      series: JSON.parse(svg.getAttribute("data-chart-series") || "[]")
+    };
+  });
+  const timeLabels = Array.from(panel.querySelectorAll("[data-chart-time]"));
+  let activePointer = null;
+  const controller = createCrosshairController(charts, function (timestamp, updates) {
+    visualizationCrosshairTimes[pair] = timestamp;
+    updates.forEach(function (update, chartIndex) {
+      const svg = chartElements[chartIndex];
+      const line = svg.querySelector("[data-crosshair-line]");
+      if (update.position === null) {
+        line.setAttribute("visibility", "hidden");
+      } else {
+        const x = 5 + update.position * 320;
+        line.setAttribute("x1", String(x));
+        line.setAttribute("x2", String(x));
+        line.setAttribute("visibility", "visible");
+      }
+      svg.querySelectorAll("[data-crosshair-value]").forEach(function (label, seriesIndex) {
+        const series = charts[chartIndex].series[seriesIndex];
+        const value = update.values[seriesIndex];
+        label.textContent = (series.label || "Значення") + ": " +
+          (Number.isFinite(value) ? formatNumber(value, series.digits) : "Немає даних");
+      });
+    });
+    timeLabels.forEach(function (label) {
+      label.textContent = "Час свічки: " + formatCrosshairTime(timestamp);
+    });
+  });
+  const initialTimes = charts[0].times;
+  const initialTimestamp = visualizationCrosshairTimes[pair] ||
+    initialTimes[initialTimes.length - 1];
+  if (Number.isFinite(initialTimestamp)) {
+    const initialPosition = initialTimes.length < 2 ? 1 :
+      (initialTimestamp - initialTimes[0]) / (initialTimes[initialTimes.length - 1] - initialTimes[0]);
+    controller.selectAt(0, initialPosition);
+  }
+  panel.addEventListener("pointerdown", function (event) {
+    const svg = event.target.closest && event.target.closest(".indicator-chart-svg");
+    if (!svg || (event.button !== undefined && event.button !== 0)) return;
+    activePointer = event.pointerId;
+    event.preventDefault();
+    if (typeof svg.setPointerCapture === "function" && Number.isFinite(event.pointerId)) {
+      try { svg.setPointerCapture(event.pointerId); } catch (error) {}
+    }
+    selectFromPointer(svg, event);
+  });
+  panel.addEventListener("pointermove", function (event) {
+    if (event.pointerType === "touch" && activePointer !== event.pointerId) return;
+    const svg = event.target.closest && event.target.closest(".indicator-chart-svg");
+    if (svg) selectFromPointer(svg, event);
+  });
+  panel.addEventListener("pointerup", function (event) {
+    if (activePointer === event.pointerId) activePointer = null;
+  });
+  panel.addEventListener("pointercancel", function (event) {
+    if (activePointer === event.pointerId) activePointer = null;
+  });
+
+  function selectFromPointer(svg, event) {
+    const chartIndex = chartElements.indexOf(svg);
+    if (chartIndex < 0) return;
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width) return;
+    const viewX = (event.clientX - bounds.left) / bounds.width * 440;
+    controller.selectAt(chartIndex, (viewX - 5) / 320);
+  }
 }
 
 function renderCard(pair) {
@@ -544,6 +682,9 @@ function render() {
     "Активних SHORT-сигналів немає. Моніторинг триває";
   cardsNode.innerHTML = pairs.length ? sortPairsBySignal(pairs, models).map(renderCard).join("") :
     '<div class="empty">Список порожній. Додайте контракт Gate.io Futures.</div>';
+  cardsNode.querySelectorAll("[data-chart-pair]").forEach(function (panel) {
+    bindSynchronizedCrosshair(panel, panel.getAttribute("data-chart-pair"));
+  });
   eventList.innerHTML = events.length ? events.map(function (event) {
     return "<li>" + escapeHtml(event) + "</li>";
   }).join("") : '<li class="empty-event">Нових змін поки немає.</li>';
@@ -555,6 +696,7 @@ function render() {
       delete pairErrors[pair];
       visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
       delete visualizationData[pair];
+      delete visualizationCrosshairTimes[pair];
       openVisualizations.delete(pair);
       savePairs();
       saveVisualizationSelections();
@@ -576,6 +718,7 @@ function render() {
     select.addEventListener("change", function () {
       const pair = select.getAttribute("data-visualization-timeframe");
       visualizationSelections = setVisualizationInterval(visualizationSelections, pair, select.value);
+      delete visualizationCrosshairTimes[pair];
       saveVisualizationSelections();
       ensureVisualizationData(pair, select.value);
       render();
