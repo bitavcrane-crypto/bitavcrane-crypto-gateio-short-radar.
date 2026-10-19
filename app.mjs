@@ -1,6 +1,7 @@
 import { addPair, buildMarketData, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
 import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
+import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
@@ -19,6 +20,7 @@ let pairs = loadPairs();
 let models = {};
 let pairErrors = {};
 let events = [];
+let openVisualizations = new Set();
 let busy = false;
 let lastSuccessfulUpdate = null;
 
@@ -116,6 +118,118 @@ function renderConfirmation(model) {
     escapeHtml(reasons) + "</p></section>";
 }
 
+function chartSvg(seriesList, options) {
+  const allValues = seriesList.reduce(function (values, series) {
+    return values.concat(series.values.filter(function (value) { return typeof value === "number" && Number.isFinite(value); }));
+  }, []);
+  if (allValues.length < 2) return '<p class="chart-empty">Недостатньо даних для графіка</p>';
+  const min = options.min === undefined ? Math.min.apply(null, allValues) : options.min;
+  const max = options.max === undefined ? Math.max.apply(null, allValues) : options.max;
+  const range = max === min ? Math.abs(max) * 0.1 || 1 : max - min;
+  const low = options.min === undefined ? min - range * 0.08 : min;
+  const high = options.max === undefined ? max + range * 0.08 : max;
+  const width = 320;
+  const height = 104;
+  const pad = 5;
+  const x = function (index, length) { return pad + index * (width - pad * 2) / Math.max(1, length - 1); };
+  const y = function (value) { return height - pad - ((value - low) / (high - low)) * (height - pad * 2); };
+  const backgrounds = options.zones ? options.zones.map(function (zone) {
+    return '<rect x="0" y="' + y(zone.to) + '" width="' + width + '" height="' +
+      Math.max(0, y(zone.from) - y(zone.to)) + '" fill="' + zone.color + '"/>';
+  }).join("") : "";
+  const guides = (options.guides || []).map(function (value) {
+    return '<line x1="0" y1="' + y(value) + '" x2="' + width + '" y2="' + y(value) +
+      '" stroke="#4c5b6c" stroke-dasharray="4 4"/>';
+  }).join("");
+  const paths = seriesList.map(function (series) {
+    const points = series.values.map(function (value, index) {
+      return typeof value === "number" && Number.isFinite(value) ? x(index, series.values.length) + "," + y(value) : null;
+    }).filter(Boolean);
+    return points.length > 1 ? '<polyline fill="none" stroke="' + series.color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="' +
+      points.join(" ") + '"/>' : "";
+  }).join("");
+  return '<svg class="indicator-chart-svg" viewBox="0 0 320 104" role="img" aria-label="' +
+    escapeHtml(options.label) + '" preserveAspectRatio="none">' + backgrounds + guides + paths + "</svg>";
+}
+
+function directionLabel(value) {
+  return value === "bullish" ? "зростає" : value === "bearish" ? "спадає" : "нейтральний";
+}
+
+function renderIndicatorVisualization(pair, model) {
+  if (pairErrors[pair] || !model || !model.data || !Array.isArray(model.data.candles15) ||
+      model.data.candles15.length === 0) {
+    return '<p class="visualization-message">Дані недоступні · очікується успішне оновлення свічок цієї пари.</p>';
+  }
+  const view = buildIndicatorVisualization(model.data.candles15, confirmationSettings, Math.floor(Date.now() / 1000));
+  if (view.status !== "ok") {
+    return '<p class="visualization-message">Дані недоступні · свічки цієї пари не отримані.</p>';
+  }
+  const indicators = view.indicators;
+  const algoDivergence = model.data.indicators && model.data.indicators.obvDivergence;
+  function chartCard(name, setting, title, content) {
+    if (!setting.enabled) {
+      return '<section class="indicator-chart-card"><h4>' + title +
+        '</h4><p class="chart-empty">Індикатор вимкнено у налаштуваннях.</p></section>';
+    }
+    return '<section class="indicator-chart-card"><h4>' + title + '</h4>' + content + '</section>';
+  }
+  const rci = indicators.rci;
+  const rciContent = !Number.isFinite(rci.value) ?
+    '<p class="chart-empty">Недостатньо даних для RCI ' + rci.period + '.</p>' :
+      '<p class="chart-summary">RCI(' + rci.period + '): <strong>' + formatNumber(rci.value, 1) +
+        '</strong> · верхня +80 / нижня −80 · ' + directionLabel(rci.direction) + '</p>' +
+      chartSvg([{ values: rci.values, color: "#77c8ff" }], {
+        min: -100, max: 100, guides: [0], label: "RCI " + rci.period,
+        zones: [{ from: 80, to: 100, color: "#633b3b66" }, { from: -100, to: -80, color: "#24574366" }]
+      });
+  const obv = indicators.obv;
+  const obvContent = !Number.isFinite(obv.value) || !Number.isFinite(obv.change) ?
+    '<p class="chart-empty">Недостатньо даних для OBV.</p>' :
+      '<p class="chart-summary">OBV Δ(' + obv.lookback + '): <strong>' + formatNumber(obv.change, 2) +
+        '</strong> · напрямок: ' + directionLabel(obv.direction) + '</p>' +
+      chartSvg([{ values: obv.values, color: "#e8b86d" }], { label: "OBV зміна за lookback" }) +
+      '<p class="chart-footnote">Згладжування не застосовується. Ведмежа дивергенція за алгоритмом радара: ' +
+      (algoDivergence ? "визначена" : "не визначена") + ".</p>";
+  const ema = indicators.ema;
+  const emaContent = !Number.isFinite(ema.fast) || !Number.isFinite(ema.slow) ?
+    '<p class="chart-empty">Недостатньо даних для EMA ' + ema.slowPeriod + '.</p>' :
+      '<p class="chart-summary">Close ' + formatNumber(ema.close, 8) + ' · EMA ' + ema.fastPeriod + " " +
+        formatNumber(ema.fast, 8) + " · EMA " + ema.slowPeriod + " " + formatNumber(ema.slow, 8) +
+        " · " + ema.position + " · " + directionLabel(ema.direction) + "</p>" +
+      chartSvg([
+        { values: ema.fastValues, color: "#49d4a5" },
+        { values: ema.slowValues, color: "#f18c8c" }
+      ], { label: "EMA " + ema.fastPeriod + " та " + ema.slowPeriod });
+  const kdj = indicators.kdj;
+  const kdjContent = !Number.isFinite(kdj.k) || !Number.isFinite(kdj.d) || !Number.isFinite(kdj.j) ?
+    '<p class="chart-empty">Недостатньо даних для KDJ ' + kdj.period + ".</p>" :
+      '<p class="chart-summary">K ' + formatNumber(kdj.k, 1) + " · D " + formatNumber(kdj.d, 1) +
+        " · J " + formatNumber(kdj.j, 1) + " · " + directionLabel(kdj.direction) + " · перетин: " +
+        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) + "</p>" +
+      chartSvg([
+        { values: kdj.kValues, color: "#77c8ff" },
+        { values: kdj.dValues, color: "#f18c8c" },
+        { values: kdj.jValues, color: "#c59bff" }
+      ], { min: 0, max: 100, guides: [20, 50, 80], label: "KDJ" });
+  return '<div class="visualization-meta">Закриті 15m свічки · параметри з поточних налаштувань</div>' +
+    '<div class="indicator-chart-grid">' +
+    chartCard("RCI", confirmationSettings.rci, "RCI · " + rci.period, rciContent) +
+    chartCard("OBV", confirmationSettings.obv, "OBV · lookback " + obv.lookback, obvContent) +
+    chartCard("EMA", confirmationSettings.ema, "EMA · " + ema.fastPeriod + " / " + ema.slowPeriod, emaContent) +
+    chartCard("KDJ", confirmationSettings.kdj, "KDJ · " + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2, kdjContent) +
+    '</div>';
+}
+
+function renderVisualizationControl(pair) {
+  const open = openVisualizations.has(pair);
+  const id = "visualization-" + pair.replace(/[^a-zA-Z0-9_-]/g, "-");
+  return '<button class="visualization-toggle" type="button" data-visualization="' + escapeHtml(pair) +
+    '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація індикаторів</button>' +
+    '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") +
+    (open ? renderIndicatorVisualization(pair, models[pair]) : "") + '</div>';
+}
+
 function renderCard(pair) {
   const model = models[pair];
   if (!model) {
@@ -124,7 +238,8 @@ function renderCard(pair) {
       '<button class="remove-button" type="button" data-remove="' + escapeHtml(pair) + '" aria-label="Видалити ' +
       escapeHtml(pair) + '">✕</button></div><span class="state incomplete">Дані недоступні</span>' +
       '<p class="why"><strong>Чому?</strong> ' + escapeHtml(pairErrors[pair] ||
-        "Очікуємо перше успішне оновлення. SHORT-сигнал не формується без перевірених даних.") + "</p></article>";
+        "Очікуємо перше успішне оновлення. SHORT-сигнал не формується без перевірених даних.") + "</p>" +
+      renderVisualizationControl(pair) + "</article>";
   }
   const data = model.data;
   const ticker = data.ticker;
@@ -198,7 +313,7 @@ function renderCard(pair) {
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
     '</div>' + levels + renderConfirmation(model) + '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
-    "</article>";
+    renderVisualizationControl(pair) + "</article>";
 }
 
 function render() {
@@ -221,7 +336,16 @@ function render() {
       pairs = removePair(pairs, pair);
       delete models[pair];
       delete pairErrors[pair];
+      openVisualizations.delete(pair);
       savePairs();
+      render();
+    });
+  });
+  cardsNode.querySelectorAll("[data-visualization]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      const pair = button.getAttribute("data-visualization");
+      if (openVisualizations.has(pair)) openVisualizations.delete(pair);
+      else openVisualizations.add(pair);
       render();
     });
   });

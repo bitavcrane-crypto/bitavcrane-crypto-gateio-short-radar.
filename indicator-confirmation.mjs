@@ -2,14 +2,14 @@ export const DEFAULT_CONFIRMATION_SETTINGS = Object.freeze({
   rci: Object.freeze({ enabled: true, period: 9 }),
   obv: Object.freeze({ enabled: true, lookback: 10 }),
   ema: Object.freeze({ enabled: true, fast: 9, slow: 21 }),
-  kdj: Object.freeze({ enabled: true, period: 9 })
+  kdj: Object.freeze({ enabled: true, period: 9, ma1: 3, ma2: 3 })
 });
 
 const SETTINGS_BOUNDS = Object.freeze({
   rci: Object.freeze({ period: [5, 30] }),
   obv: Object.freeze({ lookback: [3, 30] }),
   ema: Object.freeze({ fast: [3, 30], slow: [5, 60] }),
-  kdj: Object.freeze({ period: [5, 30] })
+  kdj: Object.freeze({ period: [5, 30], ma1: [1, 10], ma2: [1, 10] })
 });
 
 function finite(value) {
@@ -118,8 +118,8 @@ function calculateEma(candles, fastPeriod, slowPeriod) {
   };
 }
 
-function calculateKdj(candles, period) {
-  if (candles.length < period + 5) return null;
+function calculateKdj(candles, period, ma1, ma2) {
+  if (candles.length < period + ma1 + ma2 - 1) return null;
   const rawK = [];
   for (let end = period - 1; end < candles.length; end += 1) {
     const window = candles.slice(end - period + 1, end + 1);
@@ -128,15 +128,14 @@ function calculateKdj(candles, period) {
     rawK.push(highest === lowest ? 50 : ((candles[end].close - lowest) / (highest - lowest)) * 100);
   }
   const smoothedK = [];
-  const dValues = [];
-  for (let i = 2; i < rawK.length; i += 1) {
-    smoothedK.push((rawK[i] + rawK[i - 1] + rawK[i - 2]) / 3);
-    if (smoothedK.length >= 3) {
-      const offset = smoothedK.length - 1;
-      dValues.push((smoothedK[offset] + smoothedK[offset - 1] + smoothedK[offset - 2]) / 3);
-    }
+  for (let i = ma1 - 1; i < rawK.length; i += 1) {
+    smoothedK.push(rawK.slice(i + 1 - ma1, i + 1).reduce(function (sum, value) { return sum + value; }, 0) / ma1);
   }
-  if (smoothedK.length < 2 || dValues.length < 2) return null;
+  const dValues = [];
+  for (let i = ma2 - 1; i < smoothedK.length; i += 1) {
+    dValues.push(smoothedK.slice(i + 1 - ma2, i + 1).reduce(function (sum, value) { return sum + value; }, 0) / ma2);
+  }
+  if (smoothedK.length < 2 || dValues.length < 1) return null;
   const k = smoothedK[smoothedK.length - 1];
   const previousK = smoothedK[smoothedK.length - 2];
   const d = dValues[dValues.length - 1];
@@ -212,7 +211,9 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds, 
         active.obv, priorByName.obv, sameCandle),
       indicator("EMA", active.ema.enabled, function (list) { return calculateEma(list, active.ema.fast, active.ema.slow); }, closedCandles,
         active.ema, priorByName.ema, sameCandle),
-      indicator("KDJ", active.kdj.enabled, function (list) { return calculateKdj(list, active.kdj.period); }, closedCandles,
+      indicator("KDJ", active.kdj.enabled, function (list) {
+        return calculateKdj(list, active.kdj.period, active.kdj.ma1, active.kdj.ma2);
+      }, closedCandles,
         active.kdj, priorByName.kdj, sameCandle)
     ];
     const enabled = results.filter(function (result) { return result.status !== "disabled"; }).length;
