@@ -150,6 +150,7 @@ test("invalid settings fall back safely and calculation exceptions remain isolat
     rci: { enabled: true, period: 1000 },
     ema: { enabled: true, fast: 21, slow: 9 }
   });
+
   assert.equal(normalized.settings.rci.period, DEFAULT_CONFIRMATION_SETTINGS.rci.period);
   assert.ok(normalized.issues.length > 0);
   const result = evaluateShortConfirmation(candles(40, nowSeconds, "down"),
@@ -163,6 +164,14 @@ test("invalid settings fall back safely and calculation exceptions remain isolat
     { state: { key: "pump" } }, throwingSettings, nowSeconds);
   assert.equal(failed.state, "unavailable");
   assert.match(failed.quality, /базовий радар працює окремо/);
+});
+
+test("KDJ configuration supports a 99-candle lookback", function () {
+  const normalized = normalizeConfirmationSettings({
+    kdj: { period: 99, ma1: 1, ma2: 1 }
+  });
+  assert.equal(normalized.settings.kdj.period, 99);
+  assert.deepEqual(normalized.issues, []);
 });
 
 test("an API error rejects only its request and leaves supplemental analysis non-fatal", async function () {

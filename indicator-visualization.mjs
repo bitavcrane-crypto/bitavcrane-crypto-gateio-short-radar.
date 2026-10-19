@@ -117,7 +117,7 @@ export function buildIndicatorVisualization(candles, settings, nowSeconds, inter
   const byTime = new Map();
   if (Array.isArray(candles)) {
     candles.forEach(function (candle) {
-      if (!candle || !finite(candle.time) || candle.time < 0 || candle.time % seconds !== 0 ||
+      if (!candle || !finite(nowSeconds) || !finite(candle.time) || candle.time < 0 || candle.time % seconds !== 0 ||
           candle.time + seconds > nowSeconds || !finite(candle.open) || !finite(candle.high) ||
           !finite(candle.low) || !finite(candle.close) || candle.open <= 0 || candle.close <= 0 ||
           candle.low <= 0 || candle.high < Math.max(candle.open, candle.close, candle.low) ||
@@ -151,29 +151,47 @@ export function buildIndicatorVisualization(candles, settings, nowSeconds, inter
     };
   });
   const obvValue = lastFinite(computed.obv);
-  const obvPrior = lastFinite(computed.obv, 1);
+  const obvPrior = lastFinite(computed.obv, settings.obv.lookback);
   const obvChange = lastFinite(computed.obvChange);
   const kValue = lastFinite(computed.k);
+  const jValue = lastFinite(computed.j);
   const dValue = lastFinite(computed.d);
   const priorK = lastFinite(computed.k, 1);
   const priorD = lastFinite(computed.d, 1);
+  const priorJ = lastFinite(computed.j, 1);
   const kdjCross = finite(kValue) && finite(dValue) && finite(priorK) && finite(priorD) ?
     priorK <= priorD && kValue > dValue ? "bullish" :
       priorK >= priorD && kValue < dValue ? "bearish" : "none" : "unavailable";
+  const kdjDirection = direction(kValue, priorK);
+  const possibleKdjExhaustion = finite(kValue) &&
+    ((kValue >= 80 && (kdjDirection === "bearish" || kdjCross === "bearish")) ||
+     (kValue <= 20 && (kdjDirection === "bullish" || kdjCross === "bullish")));
   const close = closedCandles[closedCandles.length - 1].close;
   const selectedEma = emaLines.filter(function (line) { return finite(line.value); });
   const belowAllEma = selectedEma.length === emaLines.length && selectedEma.length > 0 &&
     selectedEma.every(function (line) { return close < line.value; });
   const aboveAllEma = selectedEma.length === emaLines.length && selectedEma.length > 0 &&
     selectedEma.every(function (line) { return close > line.value; });
-  const crossed = computed.ema.length > 1 && computed.ema[0].values.length > 1 ?
-    computed.ema.slice(1).some(function (line) {
-      const fastPrior = lastFinite(computed.ema[0].values, 1);
-      const slowPrior = lastFinite(line.values, 1);
-      return finite(fastPrior) && finite(slowPrior) &&
-        ((fastPrior <= slowPrior && lastFinite(computed.ema[0].values) > lastFinite(line.values)) ||
-         (fastPrior >= slowPrior && lastFinite(computed.ema[0].values) < lastFinite(line.values)));
-    }) : false;
+  const emaCrosses = [];
+  const lastIndex = closedCandles.length - 1;
+  for (let i = 0; i < computed.ema.length; i += 1) {
+    for (let j = i + 1; j < computed.ema.length; j += 1) {
+      const fastValues = computed.ema[i].values;
+      const slowValues = computed.ema[j].values;
+      const priorFast = fastValues[lastIndex - 1];
+      const priorSlow = slowValues[lastIndex - 1];
+      const currentFast = fastValues[lastIndex];
+      const currentSlow = slowValues[lastIndex];
+      if (finite(priorFast) && finite(priorSlow) && finite(currentFast) && finite(currentSlow)) {
+        const cross = priorFast <= priorSlow && currentFast > currentSlow ? "bullish" :
+          priorFast >= priorSlow && currentFast < currentSlow ? "bearish" : "none";
+        if (cross !== "none") emaCrosses.push({
+          periods: [computed.ema[i].period, computed.ema[j].period], direction: cross
+        });
+      }
+    }
+  }
+  const emaCross = emaCrosses.length ? emaCrosses[0].direction : "none";
   const rciPrimary = rciLines[0] || {};
   return {
     status: "ok",
@@ -199,15 +217,17 @@ export function buildIndicatorVisualization(candles, settings, nowSeconds, inter
         fast: emaLines[0] && emaLines[0].value, slow: emaLines[1] && emaLines[1].value,
         fastValues: emaLines[0] && emaLines[0].values, slowValues: emaLines[1] && emaLines[1].values,
         direction: belowAllEma ? "bearish" : aboveAllEma ? "bullish" : "neutral",
-        crossed: crossed, position: belowAllEma ? "Ціна нижче всіх EMA" :
+        crossed: emaCrosses.length > 0, cross: emaCross, crosses: emaCrosses,
+        position: belowAllEma ? "Ціна нижче всіх EMA" :
           aboveAllEma ? "Ціна вище всіх EMA" : "Ціна між EMA або недостатньо історії",
         fastDirection: emaLines[0] && emaLines[0].direction, slowDirection: emaLines[1] && emaLines[1].direction
       },
       kdj: {
         period: settings.kdj.period, ma1: settings.kdj.ma1, ma2: settings.kdj.ma2,
-        k: kValue, d: dValue, j: lastFinite(computed.j),
+        k: kValue, d: dValue, j: jValue,
         kValues: tail(computed.k), dValues: tail(computed.d), jValues: tail(computed.j),
-        direction: direction(kValue, priorK), cross: kdjCross
+        direction: kdjDirection, directions: { k: kdjDirection, d: direction(dValue, priorD), j: direction(jValue, priorJ) },
+        cross: kdjCross, possibleExhaustion: possibleKdjExhaustion
       }
     }
   };

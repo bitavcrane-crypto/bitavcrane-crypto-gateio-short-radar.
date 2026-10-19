@@ -1,6 +1,6 @@
 const API_ROOT = "https://api.gateio.ws/api/v4";
 const CACHE_MS = 15000;
-const VISUALIZATION_CANDLE_LIMIT = 300;
+const VISUALIZATION_CANDLE_LIMIT = 600;
 const cache = new Map();
 
 function numeric(value) {

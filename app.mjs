@@ -2,16 +2,15 @@ import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySign
 import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
+import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
 const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
 const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
 const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
-const VISUALIZATION_INTERVALS = { "5m": 300, "15m": 900, "1h": 3600, "4h": 14400 };
 const DEFAULT_VISUALIZATION_SETTINGS = {
-  rci: { periods: [6, 12, 24] }, obv: { lookback: 10 },
-  ema: { periods: [200, 55, 22] }, kdj: { period: 9, ma1: 3, ma2: 3 }
+  rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
 };
 const POLL_MS = 60000;
 const MAX_EVENTS = 12;
@@ -31,7 +30,6 @@ let events = [];
 let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
 let visualizationData = {};
-let visualizationLoading = new Set();
 let busy = false;
 let lastSuccessfulUpdate = null;
 
@@ -52,19 +50,9 @@ function normalizeVisualizationSettings(value) {
       return Number.isInteger(candidate) && candidate >= minimum && candidate <= maximum ? candidate : fallback;
     });
   }
-  function period(group, key, fallback, minimum, maximum) {
-    const candidate = Number(value && value[group] && value[group][key]);
-    return Number.isInteger(candidate) && candidate >= minimum && candidate <= maximum ? candidate : fallback;
-  }
   return {
     rci: { periods: periodList("rci", "periods", DEFAULT_VISUALIZATION_SETTINGS.rci.periods, 2, 100) },
-    obv: { lookback: period("obv", "lookback", 10, 2, 100) },
-    ema: { periods: periodList("ema", "periods", DEFAULT_VISUALIZATION_SETTINGS.ema.periods, 2, 500) },
-    kdj: {
-      period: period("kdj", "period", 9, 2, 100),
-      ma1: period("kdj", "ma1", 3, 1, 20),
-      ma2: period("kdj", "ma2", 3, 1, 20)
-    }
+    ema: { periods: periodList("ema", "periods", DEFAULT_VISUALIZATION_SETTINGS.ema.periods, 2, 500) }
   };
 }
 
@@ -78,13 +66,7 @@ function loadVisualizationSettings() {
 
 function loadVisualizationSelections() {
   try {
-    const stored = JSON.parse(localStorage.getItem(VISUALIZATION_STATE_KEY) || "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
-    const selections = {};
-    Object.keys(stored).forEach(function (contract) {
-      if (VISUALIZATION_INTERVALS[stored[contract]]) selections[contract] = stored[contract];
-    });
-    return selections;
+    return normalizeVisualizationSelections(JSON.parse(localStorage.getItem(VISUALIZATION_STATE_KEY) || "{}"));
   } catch (error) {
     return {};
   }
@@ -100,7 +82,16 @@ function saveVisualizationSelections() {
 }
 
 function selectedVisualizationInterval(contract) {
-  return visualizationSelections[contract] || "15m";
+  return getVisualizationInterval(visualizationSelections, contract);
+}
+
+function currentChartSettings() {
+  return {
+    rci: visualizationSettings.rci,
+    obv: confirmationSettings.obv,
+    ema: visualizationSettings.ema,
+    kdj: confirmationSettings.kdj
+  };
 }
 
 function loadPairs() {
@@ -226,6 +217,24 @@ function directionLabel(value) {
   return value === "bullish" ? "зростає" : value === "bearish" ? "спадає" : "нейтральний";
 }
 
+function hasBullishFourHourTrend(pair, interval) {
+  if (interval === "4h") return false;
+  const model = models[pair];
+  const candles = model && model.data && model.data.candles && model.data.candles["4h"];
+  if (!Array.isArray(candles) || !candles.length) return false;
+  const contextSettings = {
+    rci: { periods: [6] }, obv: { lookback: 10 }, ema: { periods: [55, 22] },
+    kdj: { period: 9, ma1: 3, ma2: 3 }
+  };
+  const context = buildIndicatorVisualization(candles, contextSettings,
+    Math.floor(Date.now() / 1000), VISUALIZATION_INTERVALS["4h"]);
+  return context.status === "ok" && context.indicators.ema.lines.length === 2 &&
+    context.indicators.ema.lines.every(function (line) {
+      return Number.isFinite(line.value) && line.direction === "bullish" &&
+        context.indicators.ema.close > line.value;
+    });
+}
+
 function renderIndicatorVisualization(pair) {
   const interval = selectedVisualizationInterval(pair);
   const data = visualizationData[pair] && visualizationData[pair][interval];
@@ -248,10 +257,11 @@ function renderIndicatorVisualization(pair) {
   if (!data.candles || !data.candles.length) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
   }
-  const view = buildIndicatorVisualization(data.candles, visualizationSettings, Math.floor(Date.now() / 1000),
+  const view = buildIndicatorVisualization(data.candles, currentChartSettings(), Math.floor(Date.now() / 1000),
     VISUALIZATION_INTERVALS[interval]);
   if (view.status === "incomplete") {
-    return header + '<p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>';
+    return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
+      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>';
   }
   if (view.status !== "ok") {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
@@ -287,7 +297,9 @@ function renderIndicatorVisualization(pair) {
     ema.lines.map(function (line) {
       return "EMA(" + line.period + ") " + formatNumber(line.value, 8) + " " + directionLabel(line.direction);
     }).join(" · ") + " · " + ema.position + " · перетин на останній свічці: " +
-    (ema.crossed ? "так" : "ні") + "</p>" +
+    (ema.crosses.length ? ema.crosses.map(function (cross) {
+      return cross.periods.join("/") + " " + cross.direction;
+    }).join(", ") : "немає") + "</p>" +
     chartSvg([{ values: ema.closeValues, color: "#f3f5f7" }].concat(ema.lines.map(function (line, index) {
       return { values: line.values, color: emaColors[index % emaColors.length] };
     })), { label: "Ціна close та EMA " + ema.periods.join(", ") }) +
@@ -299,14 +311,20 @@ function renderIndicatorVisualization(pair) {
   const kdjContent = !Number.isFinite(kdj.k) || !Number.isFinite(kdj.d) || !Number.isFinite(kdj.j) ?
     '<p class="chart-empty">Недостатньо історії для розрахунку KDJ ' + kdj.period + ".</p>" :
       '<p class="chart-summary">K ' + formatNumber(kdj.k, 1) + " · D " + formatNumber(kdj.d, 1) +
-        " · J " + formatNumber(kdj.j, 1) + " · " + directionLabel(kdj.direction) + " · перетин: " +
-        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) + "</p>" +
+        " · J " + formatNumber(kdj.j, 1) + " · напрямки K/D/J: " + directionLabel(kdj.directions.k) + " / " +
+        directionLabel(kdj.directions.d) + " / " + directionLabel(kdj.directions.j) + " · перетин: " +
+        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) +
+        " · можливе виснаження: " + (kdj.possibleExhaustion ? "так" : "не визначено") + "</p>" +
       chartSvg([
         { values: kdj.kValues, color: "#77c8ff" },
         { values: kdj.dValues, color: "#f18c8c" },
         { values: kdj.jValues, color: "#c59bff" }
       ], { guides: [20, 50, 80], label: "KDJ" });
   const model = models[pair];
+  const shortTermTurn = ema.direction === "bearish" || kdj.cross === "bearish" ||
+    rci.possibleReversalDown || kdj.possibleExhaustion ||
+    (obv.direction === "bearish" && Number.isFinite(obv.change) && obv.change < 0);
+  const higherTrendConflict = shortTermTurn && hasBullishFourHourTrend(pair, interval);
   const summary = model && model.state ? "Базовий радар: " + model.state.label +
     ". Індикатори цього таймфрейму — окремий контекст; потрібне підтвердження ціною." :
     "Базовий радар очікує дані. Графіки не змінюють його сигнали.";
@@ -316,12 +334,13 @@ function renderIndicatorVisualization(pair) {
     " свічок · остання свічка: " + escapeHtml(lastCandle) + " · дані оновлено: " + cacheTime + "</div>" +
     '<div class="indicator-chart-grid">' +
     '<section class="indicator-chart-card"><h4>RCI · ' + rci.periods.join(" / ") + "</h4>" + rciContent + "</section>" +
-    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ " + obv.lookback + "</h4>" + obvContent + "</section>" +
+    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section>" +
     '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
     '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
     "</h4>" + kdjContent + "</section></div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
-    " Перекупленість сама по собі не є умовою SHORT; сильний висхідний тренд 4h підвищує ризик контртрендового входу.</p>";
+    (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
+      " Перекупленість сама по собі не є умовою SHORT; підтвердження ціною залишається необхідним.") + "</p>";
 }
 
 function renderVisualizationControl(pair) {
@@ -439,7 +458,7 @@ function render() {
       pairs = removePair(pairs, pair);
       delete models[pair];
       delete pairErrors[pair];
-      delete visualizationSelections[pair];
+      visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
       delete visualizationData[pair];
       openVisualizations.delete(pair);
       savePairs();
@@ -461,7 +480,7 @@ function render() {
   cardsNode.querySelectorAll("[data-visualization-timeframe]").forEach(function (select) {
     select.addEventListener("change", function () {
       const pair = select.getAttribute("data-visualization-timeframe");
-      visualizationSelections[pair] = select.value;
+      visualizationSelections = setVisualizationInterval(visualizationSelections, pair, select.value);
       saveVisualizationSelections();
       ensureVisualizationData(pair, select.value);
       render();
@@ -469,17 +488,14 @@ function render() {
   });
 }
 
-async function ensureVisualizationData(contract, interval, force) {
+async function ensureVisualizationData(contract, interval) {
   if (!VISUALIZATION_INTERVALS[interval]) return;
   if (!visualizationData[contract]) visualizationData[contract] = {};
   const existing = visualizationData[contract][interval] || {};
-  if (existing.loading || (!force && existing.updatedAt &&
-      Date.now() - existing.updatedAt < POLL_MS && !existing.error)) return;
+  if (existing.loading || (existing.updatedAt && Date.now() - existing.updatedAt < POLL_MS && !existing.error)) return;
   existing.loading = true;
   delete existing.error;
   visualizationData[contract][interval] = existing;
-  const loadingKey = contract + "|" + interval;
-  visualizationLoading.add(loadingKey);
   try {
     const rows = await fetchVisualizationCandles(contract, interval);
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -492,7 +508,6 @@ async function ensureVisualizationData(contract, interval, force) {
     existing.error = error.message || "помилка API";
   } finally {
     existing.loading = false;
-    visualizationLoading.delete(loadingKey);
     visualizationData[contract][interval] = existing;
     render();
   }
@@ -575,9 +590,7 @@ function syncVisualizationControls() {
 }
 
 function readVisualizationControls() {
-  const value = {
-    rci: { periods: [] }, obv: {}, ema: { periods: [] }, kdj: {}
-  };
+  const value = { rci: { periods: [] }, ema: { periods: [] } };
   document.querySelectorAll("[data-vis-period]").forEach(function (input) {
     const path = input.dataset.visPeriod.split(".");
     if (path[0] === "rci" || path[0] === "ema") value[path[0]].periods[Number(path[1])] = input.value;
