@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  clearCache, fetchCandles, fetchOrderBook, fetchVisualizationCandles, normalizeContract,
-  normalizeOrderBook
+  clearCache, fetchCandles, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract,
+  normalizeOrderBook, normalizeTicker
 } from "../gate-api.mjs";
 
 test("visualization candle requests use the requested USDT contract and interval with 600 bars", async function (context) {
@@ -78,7 +78,9 @@ test("order book requests use the futures contract and normalize executable dept
     globalThis.fetch = originalFetch;
     clearCache();
   });
+  const beforeRequest = Date.now();
   const rawBook = await fetchOrderBook("BTC_USDT");
+  const afterRequest = Date.now();
   const book = normalizeOrderBook(rawBook, 0.01, 12345);
   assert.equal(requested.pathname, "/api/v4/futures/usdt/order_book");
   assert.equal(requested.searchParams.get("contract"), "BTC_USDT");
@@ -87,11 +89,70 @@ test("order book requests use the futures contract and normalize executable dept
   assert.ok(book.spreadPercent > 0);
   assert.equal(book.depthUsd, 99.9);
   assert.equal(book.slippagePercent, null);
-  assert.equal(book.fetchedAt, 12345);
+  assert.ok(book.fetchedAt >= beforeRequest && book.fetchedAt <= afterRequest);
   assert.equal(normalizeOrderBook(rawBook, null, 12345).quality, "INCOMPLETE");
   const deepBook = normalizeOrderBook({
     bids: [{ p: "99.9", s: "10000" }], asks: [{ p: "100.1", s: "10000" }]
   }, 0.01, 12345);
   assert.equal(deepBook.slippagePercent, 0);
   assert.equal(normalizeContract({ name: "BTC_USDT", status: "trading", quanto_multiplier: "0.01" }).quantoMultiplier, 0.01);
+});
+
+test("cached snapshots retain their actual receipt time instead of becoming fresh on normalization", async function (context) {
+  clearCache();
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = 1710000000000;
+  Date.now = function () { return now; };
+  let requests = 0;
+  globalThis.fetch = async function (url) {
+    requests += 1;
+    return { ok: true, json: async function () {
+      return url.includes("tickers") ?
+        [{ contract: "Q_USDT", last: "0.12214", volume_24h_quote: "2000000", funding_rate: "-0.000846" }] :
+        { bids: [{ p: "0.1221", s: "1000000" }], asks: [{ p: "0.1222", s: "1000000" }] };
+    } };
+  };
+  context.after(function () {
+    globalThis.fetch = originalFetch;
+    Date.now = originalNow;
+    clearCache();
+  });
+  const tickers = await fetchTickers();
+  await fetchOrderBook("Q_USDT");
+  now += 10000;
+  const cachedBook = await fetchOrderBook("Q_USDT");
+  const cachedTickers = await fetchTickers();
+  assert.equal(requests, 2);
+  assert.equal(normalizeOrderBook(cachedBook, 1, now).fetchedAt, 1710000000000);
+  assert.equal(normalizeTicker(cachedTickers[0], "Q_USDT").fetchedAt, 1710000000000);
+  assert.equal(normalizeTicker(tickers[0], "Q_USDT").funding, -0.000846);
+});
+
+test("statistics request enough five-minute snapshots for both ends of the last closed 4h interval", async function (context) {
+  clearCache();
+  const originalFetch = globalThis.fetch;
+  let url;
+  globalThis.fetch = async function (requested) {
+    url = new URL(requested);
+    return { ok: true, json: async function () { return []; } };
+  };
+  context.after(function () { globalThis.fetch = originalFetch; clearCache(); });
+  await fetchContractStats("Q_USDT");
+  assert.equal(url.searchParams.get("interval"), "5m");
+  assert.equal(url.searchParams.get("limit"), "100");
+  assert.ok((100 - 1) * 300 >= 2 * 14400);
+});
+
+test("malformed and overflowing depth never becomes a trusted order book", function () {
+  const book = {
+    bids: [{ p: "99.9", s: "10000" }, { p: "NaN", s: "Infinity" }],
+    asks: [{ p: "100.1", s: "10000" }]
+  };
+  assert.equal(normalizeOrderBook(book, 1).quality, "SUSPECT");
+  const overflow = normalizeOrderBook({
+    bids: [{ p: "99.9", s: "1e308" }], asks: [{ p: "100.1", s: "1e308" }]
+  }, 1);
+  assert.equal(overflow.quality, "SUSPECT");
+  assert.equal(overflow.depthUsd, null);
 });

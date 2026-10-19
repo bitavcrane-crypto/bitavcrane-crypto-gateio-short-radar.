@@ -1,4 +1,4 @@
-import { evaluateShortStrategy } from "./short-strategy.mjs";
+import { detectShortSetup, evaluateShortStrategy } from "./short-strategy.mjs";
 
 export const QUALITY = Object.freeze({
   OK: "OK",
@@ -60,9 +60,13 @@ export function normalizeCandles(input, interval, nowSeconds) {
   const candles = Array.from(byTime.values())
     .filter(function (candle) { return candle.time + seconds <= nowSeconds; })
     .sort(function (a, b) { return a.time - b.time; });
+  const hasGaps = candles.some(function (candle, index) {
+    return index > 0 && candle.time - candles[index - 1].time !== seconds;
+  });
   const quality = suspect || duplicates > 0 ? QUALITY.SUSPECT :
     candles.length === 0 ? QUALITY.NO_DATA :
-    nowSeconds - (candles[candles.length - 1].time + seconds) > seconds * 3 ? QUALITY.STALE : QUALITY.OK;
+    nowSeconds - (candles[candles.length - 1].time + seconds) > seconds * 3 ? QUALITY.STALE :
+      hasGaps ? QUALITY.INCOMPLETE : QUALITY.OK;
   return { candles: candles, quality: quality, duplicates: duplicates };
 }
 
@@ -91,7 +95,8 @@ export function calculateContractMetrics(stats, timeAnchors) {
     if (!latest) return null;
     let match = null;
     rows.forEach(function (row) {
-      if (row.time <= target && finite(row[field]) && (!match || row.time > match.time)) match = row;
+      if (row.time <= target && target - row.time < 300 &&
+          finite(row[field]) && (!match || row.time > match.time)) match = row;
     });
     return match;
   }
@@ -263,25 +268,43 @@ function localSupport(candles, entry) {
   return supports.sort(function (a, b) { return b - a; });
 }
 
-export function calculateLevels(candles) {
+export function calculateLevels(candles, setup = detectShortSetup(candles)) {
   if (!candles || candles.length < 15) return null;
+  if (!setup || !Number.isInteger(setup.startIndex) ||
+      setup.startIndex < Math.max(0, candles.length - 9) ||
+      setup.startIndex >= candles.length) return null;
   const indicators = calculateIndicators(candles);
   if (!finite(indicators.atr) || indicators.atr <= 0) return null;
-  const recent = candles.slice(-20);
+  const recent = candles.slice(setup.startIndex);
   const entry = candles[candles.length - 1].close;
-  const localHigh = Math.max.apply(null, recent.map(function (candle) { return candle.high; }));
-  const stop = Math.max(localHigh, entry + indicators.atr) + indicators.atr * 0.2;
+  const invalidationCandle = recent.reduce(function (highest, candle) {
+    return candle.high > highest.high ? candle : highest;
+  });
+  const localHigh = invalidationCandle.high;
+  const stop = localHigh + indicators.atr * 0.2;
   const risk = stop - entry;
-  if (risk <= 0) return null;
   const supports = localSupport(candles, entry);
-  const tp1 = supports.length ? supports[0] : entry - indicators.atr;
+  const tp1 = supports.length ? supports[0] : null;
+  const reason = !finite(risk) || localHigh <= entry ? "немає локального рівня інвалідації вище Entry" :
+    risk > indicators.atr * 3 ? "Stop надто далекий: " + (risk / indicators.atr).toFixed(2) + " ATR > 3 ATR" :
+      !supports.length ? "немає локальної підтримки нижче Entry для TP1" : null;
+  if (reason) return {
+    entry: entry, stop: stop, tp1: tp1, tp2: null, tp3: null,
+    riskReward: null, atr: indicators.atr, support: tp1,
+    invalidation: localHigh, sourceTime: invalidationCandle.time, valid: false, reason: reason
+  };
   const tp2 = Math.min(entry - indicators.atr * 2, tp1 - indicators.atr);
   const tp3 = Math.min(entry - indicators.atr * 3, tp2 - indicators.atr);
+  const valid = [entry, stop, tp1, tp2, tp3].every(function (value) {
+    return finite(value) && value > 0;
+  }) && stop > entry && entry > tp1 && tp1 > tp2 && tp2 > tp3;
   return {
     entry: entry, stop: stop, tp1: tp1, tp2: tp2, tp3: tp3,
-    riskReward: (entry - tp1) / risk,
+    riskReward: valid ? (entry - tp1) / risk : null,
     atr: indicators.atr,
-    support: supports.length ? supports[0] : null
+    support: supports[0],
+    invalidation: localHigh, sourceTime: invalidationCandle.time,
+    valid: valid, reason: valid ? null : "некоректний порядок або значення Entry/Stop/TP"
   };
 }
 
@@ -386,6 +409,7 @@ export function buildMarketData(input) {
     oiChange15m: oiChange15m,
     fundingIntervalSeconds: fundingInterval,
     fundingNormalized: fundingNormalized,
+    nowSeconds: input.nowSeconds,
     minimumRiskReward: finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
       input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5
   };
@@ -405,6 +429,7 @@ export function buildMarketData(input) {
     volumeRatio: ratio,
     indicators: indicators,
     fundingNormalized: fundingNormalized,
+    nowSeconds: input.nowSeconds,
     levels: provisionalLevels,
     minimumRiskReward: data.minimumRiskReward
   });
@@ -422,10 +447,10 @@ export function buildMarketData(input) {
   let state = signalState(pump, exhaustion, breakdown, confirmed, usableCandles, shortReady);
   if (strategy.allowed) {
     state = { key: "entry", label: "SHORT ENTRY · " + strategy.setup.type, score: 80 };
-  } else if (strategy.setup && !strategy.dataReady) {
+  } else if (!strategy.dataReady && strategy.setup) {
     state = { key: "incomplete", label: "NO TRADE — DATA UNAVAILABLE", score: 0 };
-  } else if (strategy.setup && shortReady && pump >= 45 && exhaustion >= 55) {
-    state = { key: "setup", label: "WATCH · очікування підтвердження", score: 45 };
+  } else if (strategy.setup) {
+    state = { key: "setup", label: strategy.setupStatus + " · NO TRADE", score: 45 };
   }
   const levels = strategy.setup ? provisionalLevels : null;
   const shortScore = strategy.score;
@@ -446,7 +471,8 @@ export function buildMarketData(input) {
     strategy: strategy,
     why: why,
     confidence: confidence,
-    quality: overallQuality(data)
+    quality: overallQuality(data) === QUALITY.OK && !strategy.dataReady ?
+      QUALITY.INCOMPLETE : overallQuality(data)
   };
 }
 
@@ -472,7 +498,7 @@ function explain(data, pump, exhaustion, state, strategy) {
       data.qualities["15m"] + ", ticker: " + (data.ticker.quality || QUALITY.NO_DATA) +
       ", contract stats: " + data.stats.quality + ", order book: " +
       (data.orderBook.quality || QUALITY.NO_DATA) + "). NO TRADE — DATA UNAVAILABLE. " +
-      (strategy && strategy.blockers.length ? strategy.blockers.join(" · ") : "SHORT-сигнал не формується.");
+      "Конкретні причини наведені в блоці стратегії.";
   }
   const main = data.changes["1h"];
   if (finite(main) && main > 0) parts.push("Ціна " + (main >= 0 ? "+" : "") + main.toFixed(2) + "% за 1h");
@@ -481,7 +507,8 @@ function explain(data, pump, exhaustion, state, strategy) {
     parts.push("OI " + (data.oiChange15m >= 0 ? "+" : "") + data.oiChange15m.toFixed(2) + "% за 15m");
   }
   else parts.push("зміна OI накопичується");
-  if (data.stats.quality === QUALITY.OK && finite(main) && main > 0 && finite(data.oiChange15m)) {
+  const price15 = data.changes["15m"];
+  if (data.stats.quality === QUALITY.OK && finite(price15) && price15 > 0 && finite(data.oiChange15m)) {
     if (data.oiChange15m > 0) parts.push("ціна ↑ + OI ↑ — нарощування позицій");
     else if (data.oiChange15m < 0) parts.push("ціна ↑ + OI ↓ — можливий SHORT squeeze");
   }
@@ -490,11 +517,6 @@ function explain(data, pump, exhaustion, state, strategy) {
        data.changes["15m"] > 0 && data.changes["5m"] < data.changes["15m"] * 0.35)) {
     parts.push("momentum сповільнюється або розвернувся");
   }
-  if (data.stats.quality === QUALITY.OK && finite(data.stats.shortLiquidationUsd) && data.stats.shortLiquidationUsd > 0 &&
-      finite(data.stats.longLiquidationUsd) &&
-      data.stats.shortLiquidationUsd > data.stats.longLiquidationUsd * 3) {
-    parts.push("переважають ліквідації SHORT за останні 5m — можливий squeeze");
-  }
   if (strategy && strategy.matrix) {
     parts.push("Price × OI 15m/1h/4h: " + strategy.matrix["15m"].label + " / " +
       strategy.matrix["1h"].label + " / " + strategy.matrix["4h"].label);
@@ -502,7 +524,6 @@ function explain(data, pump, exhaustion, state, strategy) {
   if (strategy && strategy.setup) parts.push("сетап: " + strategy.setup.type + " біля " +
     strategy.setup.level.toFixed(6));
   if (state.key === "entry") parts.push("усі обов’язкові блокувальні перевірки пройдено");
-  if (strategy && strategy.blockers.length) parts.push(strategy.blockers.join(" · "));
   if (state.key === "setup") parts.push("є сетап; SHORT ENTRY ще не дозволено");
   if (finite(data.indicators.rsi) && data.indicators.rsi >= 75) parts.push("RSI перегрітий, але сам по собі не є SHORT-сигналом");
   if (data.stats.quality === QUALITY.OK && finite(data.stats.lsrAccount) && data.stats.lsrAccount >= 2) {

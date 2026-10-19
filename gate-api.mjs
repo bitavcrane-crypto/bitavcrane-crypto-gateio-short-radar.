@@ -2,6 +2,7 @@ const API_ROOT = "https://api.gateio.ws/api/v4";
 const CACHE_MS = 15000;
 const VISUALIZATION_CANDLE_LIMIT = 600;
 const cache = new Map();
+const receivedAt = new WeakMap();
 
 function numeric(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -16,7 +17,14 @@ async function request(path, cacheMs) {
   const response = await fetch(API_ROOT + path, { headers: { Accept: "application/json" } });
   if (!response.ok) throw new Error("Gate.io відповів HTTP " + response.status);
   const data = await response.json();
-  cache.set(path, { time: now, value: data });
+  const time = Date.now();
+  if (data && typeof data === "object") {
+    receivedAt.set(data, time);
+    if (Array.isArray(data)) data.forEach(function (row) {
+      if (row && typeof row === "object") receivedAt.set(row, time);
+    });
+  }
+  cache.set(path, { time: time, value: data });
   return data;
 }
 
@@ -48,7 +56,7 @@ async function fetchCandlesWithLimit(contract, interval, limit) {
 }
 
 export async function fetchContractStats(contract) {
-  const query = "?contract=" + encodeURIComponent(contract) + "&interval=5m&limit=60";
+  const query = "?contract=" + encodeURIComponent(contract) + "&interval=5m&limit=100";
   const rows = await request("/futures/usdt/contract_stats" + query, CACHE_MS);
   if (!Array.isArray(rows)) throw new Error("Некоректна статистика " + contract);
   return rows;
@@ -78,7 +86,8 @@ export function normalizeTicker(row, contract) {
     mark: numberField("mark_price"),
     index: numberField("index_price"),
     funding: funding,
-    volume24h: numberField("volume_24h_quote", true)
+    volume24h: numberField("volume_24h_quote", true),
+    fetchedAt: receivedAt.get(row) || Date.now()
   };
 }
 
@@ -94,25 +103,30 @@ export function normalizeContract(row) {
 }
 
 export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
+  const fetchedAt = receivedAt.get(book) || fetchedAtMs || Date.now();
+  let invalidLevels = false;
   const levels = function (items, isBid) {
     if (!Array.isArray(items)) return [];
     return items.map(function (level) {
       const price = numeric(Array.isArray(level) ? level[0] : level && level.p);
       const size = numeric(Array.isArray(level) ? level[1] : level && level.s);
-      return price !== null && price > 0 && size !== null && size > 0 ?
-        { price: price, size: size, bid: isBid } : null;
+      if (price === null || price <= 0 || size === null || size <= 0) {
+        invalidLevels = true;
+        return null;
+      }
+      return { price: price, size: size, bid: isBid };
     }).filter(Boolean);
   };
   const bids = levels(book && book.bids, true).sort(function (a, b) { return b.price - a.price; });
   const asks = levels(book && book.asks, false).sort(function (a, b) { return a.price - b.price; });
   const multiplier = numeric(contractMultiplier);
   if (!bids.length || !asks.length || multiplier === null || multiplier <= 0) {
-    return { quality: "INCOMPLETE", bestBid: null, bestAsk: null, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAtMs || null };
+    return { quality: "INCOMPLETE", bestBid: null, bestAsk: null, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAt };
   }
   const bestBid = bids[0].price;
   const bestAsk = asks[0].price;
   if (bestAsk <= bestBid) {
-    return { quality: "SUSPECT", bestBid: bestBid, bestAsk: bestAsk, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAtMs || null };
+    return { quality: "SUSPECT", bestBid: bestBid, bestAsk: bestAsk, spreadPercent: null, depthUsd: null, fetchedAt: fetchedAt };
   }
   const midpoint = (bestBid + bestAsk) / 2;
   const depthWithinHalfPercent = function (items) {
@@ -141,15 +155,17 @@ export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
   const askDepth = depthWithinHalfPercent(asks);
   const bidSlippage = estimateSlippage(bids);
   const askSlippage = estimateSlippage(asks);
+  const spreadPercent = (bestAsk / bestBid - 1) * 100;
+  const depthUsd = Math.min(bidDepth, askDepth);
   return {
-    quality: "OK",
+    quality: invalidLevels || !Number.isFinite(spreadPercent) || !Number.isFinite(depthUsd) ? "SUSPECT" : "OK",
     bestBid: bestBid,
     bestAsk: bestAsk,
-    spreadPercent: (bestAsk / bestBid - 1) * 100,
-    depthUsd: Math.min(bidDepth, askDepth),
+    spreadPercent: Number.isFinite(spreadPercent) ? spreadPercent : null,
+    depthUsd: Number.isFinite(depthUsd) ? depthUsd : null,
     slippagePercent: bidSlippage === null || askSlippage === null ? null :
       Math.max(bidSlippage, askSlippage),
-    fetchedAt: fetchedAtMs || Date.now()
+    fetchedAt: fetchedAt
   };
 }
 
