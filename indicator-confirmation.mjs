@@ -9,7 +9,7 @@ const SETTINGS_BOUNDS = Object.freeze({
   rci: Object.freeze({ period: [5, 30] }),
   obv: Object.freeze({ lookback: [3, 30] }),
   ema: Object.freeze({ fast: [3, 30], slow: [5, 60] }),
-  kdj: Object.freeze({ period: [5, 30], ma1: [1, 10], ma2: [1, 10] })
+  kdj: Object.freeze({ period: [5, 100], ma1: [1, 10], ma2: [1, 10] })
 });
 
 function finite(value) {

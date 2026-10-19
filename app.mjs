@@ -1,11 +1,17 @@
-import { addPair, buildMarketData, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
-import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
+import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
+import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
+import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
 const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
+const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
+const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
+const DEFAULT_VISUALIZATION_SETTINGS = {
+  rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
+};
 const POLL_MS = 60000;
 const MAX_EVENTS = 12;
 const cardsNode = document.getElementById("cards");
@@ -15,12 +21,15 @@ const connectionNode = document.getElementById("connection");
 const eventList = document.getElementById("event-list");
 const pairInput = document.getElementById("pair-input");
 let confirmationSettings = loadConfirmationSettings();
+let visualizationSettings = loadVisualizationSettings();
 let contracts = [];
 let pairs = loadPairs();
 let models = {};
 let pairErrors = {};
 let events = [];
 let openVisualizations = new Set();
+let visualizationSelections = loadVisualizationSelections();
+let visualizationData = {};
 let busy = false;
 let lastSuccessfulUpdate = null;
 
@@ -31,6 +40,58 @@ function loadConfirmationSettings() {
   } catch (error) {
     return normalizeConfirmationSettings(DEFAULT_CONFIRMATION_SETTINGS).settings;
   }
+}
+
+function normalizeVisualizationSettings(value) {
+  function periodList(group, key, defaults, minimum, maximum) {
+    const supplied = value && value[group] && Array.isArray(value[group][key]) ? value[group][key] : [];
+    return defaults.map(function (fallback, index) {
+      const candidate = Number(supplied[index]);
+      return Number.isInteger(candidate) && candidate >= minimum && candidate <= maximum ? candidate : fallback;
+    });
+  }
+  return {
+    rci: { periods: periodList("rci", "periods", DEFAULT_VISUALIZATION_SETTINGS.rci.periods, 2, 100) },
+    ema: { periods: periodList("ema", "periods", DEFAULT_VISUALIZATION_SETTINGS.ema.periods, 2, 500) }
+  };
+}
+
+function loadVisualizationSettings() {
+  try {
+    return normalizeVisualizationSettings(JSON.parse(localStorage.getItem(VISUALIZATION_SETTINGS_KEY) || "null"));
+  } catch (error) {
+    return normalizeVisualizationSettings(DEFAULT_VISUALIZATION_SETTINGS);
+  }
+}
+
+function loadVisualizationSelections() {
+  try {
+    return normalizeVisualizationSelections(JSON.parse(localStorage.getItem(VISUALIZATION_STATE_KEY) || "{}"));
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveVisualizationSelections() {
+  try {
+    localStorage.setItem(VISUALIZATION_STATE_KEY, JSON.stringify(visualizationSelections));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Вибір таймфрейму не вдалося зберегти у localStorage.";
+  }
+}
+
+function selectedVisualizationInterval(contract) {
+  return getVisualizationInterval(visualizationSelections, contract);
+}
+
+function currentChartSettings() {
+  return {
+    rci: visualizationSettings.rci,
+    obv: confirmationSettings.obv,
+    ema: visualizationSettings.ema,
+    kdj: confirmationSettings.kdj
+  };
 }
 
 function loadPairs() {
@@ -156,70 +217,130 @@ function directionLabel(value) {
   return value === "bullish" ? "зростає" : value === "bearish" ? "спадає" : "нейтральний";
 }
 
-function renderIndicatorVisualization(pair, model) {
-  if (pairErrors[pair] || !model || !model.data || !Array.isArray(model.data.candles15) ||
-      model.data.candles15.length === 0) {
-    return '<p class="visualization-message">Дані недоступні · очікується успішне оновлення свічок цієї пари.</p>';
+function hasBullishFourHourTrend(pair, interval) {
+  if (interval === "4h") return false;
+  const model = models[pair];
+  const candles = model && model.data && model.data.candles && model.data.candles["4h"];
+  if (!Array.isArray(candles) || !candles.length) return false;
+  const contextSettings = {
+    rci: { periods: [6] }, obv: { lookback: 10 }, ema: { periods: [55, 22] },
+    kdj: { period: 9, ma1: 3, ma2: 3 }
+  };
+  const context = buildIndicatorVisualization(candles, contextSettings,
+    Math.floor(Date.now() / 1000), VISUALIZATION_INTERVALS["4h"]);
+  return context.status === "ok" && context.indicators.ema.lines.length === 2 &&
+    context.indicators.ema.lines.every(function (line) {
+      return Number.isFinite(line.value) && line.direction === "bullish" &&
+        context.indicators.ema.close > line.value;
+    });
+}
+
+function renderIndicatorVisualization(pair) {
+  const interval = selectedVisualizationInterval(pair);
+  const data = visualizationData[pair] && visualizationData[pair][interval];
+  const cacheTime = data && data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString("uk-UA") : "немає";
+  const lastCandle = data && data.candles && data.candles.length ?
+    new Date(data.candles[data.candles.length - 1].time * 1000).toLocaleString("uk-UA") : "немає";
+  const header = '<div class="visualization-heading"><strong>' + escapeHtml(pair) +
+    ' · RCI / EMA / KDJ · ' + interval + '</strong><label>Таймфрейм <select data-visualization-timeframe="' +
+    escapeHtml(pair) + '" aria-label="Таймфрейм графіків ' + escapeHtml(pair) + '">' +
+    Object.keys(VISUALIZATION_INTERVALS).map(function (item) {
+      return '<option value="' + item + '"' + (item === interval ? " selected" : "") + ">" + item + "</option>";
+    }).join("") + '</select></label></div>';
+  if (!data || data.loading || (!data.candles && !data.error)) {
+    return header + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>";
   }
-  const view = buildIndicatorVisualization(model.data.candles15, confirmationSettings, Math.floor(Date.now() / 1000));
+  if (data.error && (!data.candles || !data.candles.length)) {
+    return header + '<p class="visualization-message">Дані тимчасово недоступні · ' +
+      escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>";
+  }
+  if (!data.candles || !data.candles.length) {
+    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
+  }
+  const view = buildIndicatorVisualization(data.candles, currentChartSettings(), Math.floor(Date.now() / 1000),
+    VISUALIZATION_INTERVALS[interval]);
+  if (view.status === "incomplete") {
+    return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
+      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>';
+  }
   if (view.status !== "ok") {
-    return '<p class="visualization-message">Дані недоступні · свічки цієї пари не отримані.</p>';
+    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
   }
   const indicators = view.indicators;
-  const algoDivergence = model.data.indicators && model.data.indicators.obvDivergence;
-  function chartCard(name, setting, title, content) {
-    if (!setting.enabled) {
-      return '<section class="indicator-chart-card"><h4>' + title +
-        '</h4><p class="chart-empty">Індикатор вимкнено у налаштуваннях.</p></section>';
-    }
-    return '<section class="indicator-chart-card"><h4>' + title + '</h4>' + content + '</section>';
-  }
   const rci = indicators.rci;
-  const rciContent = !Number.isFinite(rci.value) ?
-    '<p class="chart-empty">Недостатньо даних для RCI ' + rci.period + '.</p>' :
-      '<p class="chart-summary">RCI(' + rci.period + '): <strong>' + formatNumber(rci.value, 1) +
-        '</strong> · верхня +80 / нижня −80 · ' + directionLabel(rci.direction) + '</p>' +
-      chartSvg([{ values: rci.values, color: "#77c8ff" }], {
-        min: -100, max: 100, guides: [0], label: "RCI " + rci.period,
-        zones: [{ from: 80, to: 100, color: "#633b3b66" }, { from: -100, to: -80, color: "#24574366" }]
-      });
+  const rciColors = ["#77c8ff", "#49d4a5", "#f18c8c"];
+  const rciContent = '<p class="chart-summary">' + rci.lines.map(function (line) {
+    return "RCI(" + line.period + ") <strong>" + formatNumber(line.value, 1) + '</strong> · ' +
+      directionLabel(line.direction);
+  }).join(" · ") + " · шкала −100…+100 · " +
+    (rci.possibleReversalDown ? "можливий розворот униз" : "розворот униз не підтверджено") + "</p>" +
+    chartSvg(rci.lines.map(function (line, index) {
+      return { values: line.values, color: rciColors[index % rciColors.length] };
+    }), {
+      min: -100, max: 100, guides: [-80, 0, 80], label: "RCI periods " + rci.periods.join(", "),
+      zones: [{ from: 80, to: 100, color: "#633b3b66" }, { from: -100, to: -80, color: "#24574366" }]
+    }) + '<p class="chart-footnote">Дивергенція RCI не визначається: надійного алгоритму в модулі немає.</p>';
   const obv = indicators.obv;
-  const obvContent = !Number.isFinite(obv.value) || !Number.isFinite(obv.change) ?
-    '<p class="chart-empty">' + (obv.volumeAvailable ? "Недостатньо даних для OBV." : "Дані недоступні для OBV · немає обсягу свічок.") + "</p>" :
-      '<p class="chart-summary">OBV Δ(' + obv.lookback + '): <strong>' + formatNumber(obv.change, 2) +
-        '</strong> · напрямок: ' + directionLabel(obv.direction) + '</p>' +
-      chartSvg([{ values: obv.values, color: "#e8b86d" }], { label: "OBV зміна за lookback" }) +
-      '<p class="chart-footnote">Згладжування не застосовується. Ведмежа дивергенція за алгоритмом радара: ' +
-      (algoDivergence ? "визначена" : "не визначена") + ".</p>";
-  const ema = indicators.ema;
-  const emaContent = !Number.isFinite(ema.fast) || !Number.isFinite(ema.slow) ?
-    '<p class="chart-empty">Недостатньо даних для EMA ' + ema.slowPeriod + '.</p>' :
-      '<p class="chart-summary">Close ' + formatNumber(ema.close, 8) + ' · EMA ' + ema.fastPeriod + " " +
-        formatNumber(ema.fast, 8) + " · EMA " + ema.slowPeriod + " " + formatNumber(ema.slow, 8) +
-        " · " + ema.position + " · напрямок EMA " + ema.fastPeriod + ": " + directionLabel(ema.fastDirection) +
-        ", EMA " + ema.slowPeriod + ": " + directionLabel(ema.slowDirection) + "</p>" +
+  const obvContent = !obv.volumeAvailable ?
+    '<p class="chart-empty">Дані тимчасово недоступні для OBV · немає повного обсягу.</p>' :
+      '<p class="chart-summary">Зміна OBV (' + obv.lookback + ' свічок): <strong>' +
+        formatNumber(obv.change, 2) + '</strong> · напрямок: ' + directionLabel(obv.direction) + "</p>" +
       chartSvg([
-        { values: ema.fastValues, color: "#49d4a5" },
-        { values: ema.slowValues, color: "#f18c8c" }
-      ], { label: "EMA " + ema.fastPeriod + " та " + ema.slowPeriod });
+        { values: obv.values, color: "#e8b86d" },
+        { values: obv.averageValues, color: "#77c8ff" }
+      ], { label: "OBV та SMA " + obv.lookback }) +
+      '<p class="chart-footnote">OBV розраховано за напрямком close; лінія згладжування — SMA(' +
+      obv.lookback + "). Абсолютний OBV не є самостійним SHORT-сигналом.</p>";
+  const ema = indicators.ema;
+  const emaColors = ["#49d4a5", "#f18c8c", "#c59bff"];
+  const emaContent = '<p class="chart-summary">Close ' + formatNumber(ema.close, 8) + " · " +
+    ema.lines.map(function (line) {
+      return "EMA(" + line.period + ") " + formatNumber(line.value, 8) + " " + directionLabel(line.direction);
+    }).join(" · ") + " · " + ema.position + " · перетин на останній свічці: " +
+    (ema.crosses.length ? ema.crosses.map(function (cross) {
+      return cross.periods.join("/") + " " + cross.direction;
+    }).join(", ") : "немає") + "</p>" +
+    chartSvg([{ values: ema.closeValues, color: "#f3f5f7" }].concat(ema.lines.map(function (line, index) {
+      return { values: line.values, color: emaColors[index % emaColors.length] };
+    })), { label: "Ціна close та EMA " + ema.periods.join(", ") }) +
+    (ema.lines.some(function (line) { return !Number.isFinite(line.value); }) ?
+      '<p class="chart-footnote">Недостатньо історії для EMA ' + ema.lines.filter(function (line) {
+        return !Number.isFinite(line.value);
+      }).map(function (line) { return line.period; }).join(", ") + ".</p>" : "");
   const kdj = indicators.kdj;
   const kdjContent = !Number.isFinite(kdj.k) || !Number.isFinite(kdj.d) || !Number.isFinite(kdj.j) ?
-    '<p class="chart-empty">Недостатньо даних для KDJ ' + kdj.period + ".</p>" :
+    '<p class="chart-empty">Недостатньо історії для розрахунку KDJ ' + kdj.period + ".</p>" :
       '<p class="chart-summary">K ' + formatNumber(kdj.k, 1) + " · D " + formatNumber(kdj.d, 1) +
-        " · J " + formatNumber(kdj.j, 1) + " · " + directionLabel(kdj.direction) + " · перетин: " +
-        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) + "</p>" +
+        " · J " + formatNumber(kdj.j, 1) + " · напрямки K/D/J: " + directionLabel(kdj.directions.k) + " / " +
+        directionLabel(kdj.directions.d) + " / " + directionLabel(kdj.directions.j) + " · перетин: " +
+        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) +
+        " · можливе виснаження: " + (kdj.possibleExhaustion ? "так" : "не визначено") + "</p>" +
       chartSvg([
         { values: kdj.kValues, color: "#77c8ff" },
         { values: kdj.dValues, color: "#f18c8c" },
         { values: kdj.jValues, color: "#c59bff" }
-      ], { min: 0, max: 100, guides: [20, 50, 80], label: "KDJ" });
-  return '<div class="visualization-meta">Закриті 15m свічки · параметри з поточних налаштувань</div>' +
+      ], { guides: [20, 50, 80], label: "KDJ" });
+  const model = models[pair];
+  const shortTermTurn = ema.direction === "bearish" || kdj.cross === "bearish" ||
+    rci.possibleReversalDown || kdj.possibleExhaustion ||
+    (obv.direction === "bearish" && Number.isFinite(obv.change) && obv.change < 0);
+  const higherTrendConflict = shortTermTurn && hasBullishFourHourTrend(pair, interval);
+  const summary = model && model.state ? "Базовий радар: " + model.state.label +
+    ". Індикатори цього таймфрейму — окремий контекст; потрібне підтвердження ціною." :
+    "Базовий радар очікує дані. Графіки не змінюють його сигнали.";
+  return header + (data.error ? '<p class="visualization-message">Дані тимчасово недоступні · показано останній успішний набір · ' +
+    escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" : "") +
+    '<div class="visualization-meta">' + view.candles.length + " закритих " + interval +
+    " свічок · остання свічка: " + escapeHtml(lastCandle) + " · дані оновлено: " + cacheTime + "</div>" +
     '<div class="indicator-chart-grid">' +
-    chartCard("RCI", confirmationSettings.rci, "RCI · " + rci.period, rciContent) +
-    chartCard("OBV", confirmationSettings.obv, "OBV · lookback " + obv.lookback, obvContent) +
-    chartCard("EMA", confirmationSettings.ema, "EMA · " + ema.fastPeriod + " / " + ema.slowPeriod, emaContent) +
-    chartCard("KDJ", confirmationSettings.kdj, "KDJ · " + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2, kdjContent) +
-    '</div>';
+    '<section class="indicator-chart-card"><h4>RCI · ' + rci.periods.join(" / ") + "</h4>" + rciContent + "</section>" +
+    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section>" +
+    '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
+    '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
+    "</h4>" + kdjContent + "</section></div>" +
+    '<p class="visualization-summary">' + escapeHtml(summary) +
+    (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
+      " Перекупленість сама по собі не є умовою SHORT; підтвердження ціною залишається необхідним.") + "</p>";
 }
 
 function renderVisualizationControl(pair) {
@@ -228,7 +349,7 @@ function renderVisualizationControl(pair) {
   return '<button class="visualization-toggle" type="button" data-visualization="' + escapeHtml(pair) +
     '" aria-controls="' + id + '" aria-expanded="' + open + '">📊 Візуалізація індикаторів</button>' +
     '<div class="visualization-panel" id="' + id + '"' + (open ? "" : " hidden") + '>' +
-    (open ? renderIndicatorVisualization(pair, models[pair]) : "") + '</div>';
+    (open ? renderIndicatorVisualization(pair) : "") + '</div>';
 }
 
 function renderCard(pair) {
@@ -337,8 +458,11 @@ function render() {
       pairs = removePair(pairs, pair);
       delete models[pair];
       delete pairErrors[pair];
+      visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
+      delete visualizationData[pair];
       openVisualizations.delete(pair);
       savePairs();
+      saveVisualizationSelections();
       render();
     });
   });
@@ -346,9 +470,52 @@ function render() {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-visualization");
       if (openVisualizations.has(pair)) openVisualizations.delete(pair);
-      else openVisualizations.add(pair);
+      else {
+        openVisualizations.add(pair);
+        ensureVisualizationData(pair, selectedVisualizationInterval(pair));
+      }
       render();
     });
+  });
+  cardsNode.querySelectorAll("[data-visualization-timeframe]").forEach(function (select) {
+    select.addEventListener("change", function () {
+      const pair = select.getAttribute("data-visualization-timeframe");
+      visualizationSelections = setVisualizationInterval(visualizationSelections, pair, select.value);
+      saveVisualizationSelections();
+      ensureVisualizationData(pair, select.value);
+      render();
+    });
+  });
+}
+
+async function ensureVisualizationData(contract, interval) {
+  if (!VISUALIZATION_INTERVALS[interval]) return;
+  if (!visualizationData[contract]) visualizationData[contract] = {};
+  const existing = visualizationData[contract][interval] || {};
+  if (existing.loading || (existing.updatedAt && Date.now() - existing.updatedAt < POLL_MS && !existing.error)) return;
+  existing.loading = true;
+  delete existing.error;
+  visualizationData[contract][interval] = existing;
+  try {
+    const rows = await fetchVisualizationCandles(contract, interval);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const normalized = normalizeCandles(rows, interval, nowSeconds);
+    if (!normalized.candles.length) throw new Error("Gate.io не повернув завершені свічки");
+    existing.candles = normalized.candles;
+    existing.quality = normalized.quality;
+    existing.updatedAt = Date.now();
+  } catch (error) {
+    existing.error = error.message || "помилка API";
+  } finally {
+    existing.loading = false;
+    visualizationData[contract][interval] = existing;
+    render();
+  }
+}
+
+function refreshOpenVisualizations() {
+  openVisualizations.forEach(function (contract) {
+    ensureVisualizationData(contract, selectedVisualizationInterval(contract));
   });
 }
 
@@ -411,6 +578,33 @@ function syncConfirmationControls() {
     const path = input.dataset.period.split(".");
     input.value = confirmationSettings[path[0]][path[1]];
   });
+}
+
+function syncVisualizationControls() {
+  document.querySelectorAll("[data-vis-period]").forEach(function (input) {
+    const path = input.dataset.visPeriod.split(".");
+    input.value = path[0] === "rci" || path[0] === "ema" ?
+      visualizationSettings[path[0]].periods[Number(path[1])] :
+      visualizationSettings[path[0]][path[1]];
+  });
+}
+
+function readVisualizationControls() {
+  const value = { rci: { periods: [] }, ema: { periods: [] } };
+  document.querySelectorAll("[data-vis-period]").forEach(function (input) {
+    const path = input.dataset.visPeriod.split(".");
+    if (path[0] === "rci" || path[0] === "ema") value[path[0]].periods[Number(path[1])] = input.value;
+    else value[path[0]][path[1]] = input.value;
+  });
+  visualizationSettings = normalizeVisualizationSettings(value);
+  try {
+    localStorage.setItem(VISUALIZATION_SETTINGS_KEY, JSON.stringify(visualizationSettings));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Параметри графіків не вдалося зберегти у localStorage.";
+  }
+  syncVisualizationControls();
+  render();
 }
 
 function readConfirmationControls() {
@@ -500,6 +694,7 @@ async function scan() {
     if (!failures.length) lastSuccessfulUpdate = new Date();
     document.getElementById("updated-at").textContent = lastSuccessLabel();
     render();
+    refreshOpenVisualizations();
   } catch (error) {
     connectionNode.textContent = "⚠️ Gate.io API недоступний";
     connectionNode.className = "connection offline";
@@ -558,7 +753,23 @@ document.getElementById("reset-confirmation").addEventListener("click", function
   noticeNode.hidden = true;
 });
 
+document.querySelectorAll("[data-vis-period]").forEach(function (input) {
+  input.addEventListener("change", readVisualizationControls);
+});
+document.getElementById("reset-visualization").addEventListener("click", function () {
+  visualizationSettings = normalizeVisualizationSettings(DEFAULT_VISUALIZATION_SETTINGS);
+  try {
+    localStorage.setItem(VISUALIZATION_SETTINGS_KEY, JSON.stringify(visualizationSettings));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Параметри графіків не вдалося зберегти у localStorage.";
+  }
+  syncVisualizationControls();
+  render();
+});
+
 syncConfirmationControls();
+syncVisualizationControls();
 render();
 scan();
 window.setInterval(scan, POLL_MS);
