@@ -114,10 +114,15 @@ test("visualization crosshair shares pointer interaction across charts and reset
   assert.match(source, /controller\.selectAt\(chartIndex/);
   assert.match(source, /positionAtClientX\(event\.clientX/);
   assert.match(source, /data-crosshair-horizontal/);
-  assert.match(source, /valueAtPosition\(update\.values\[0\]/);
+  assert.match(source, /valueAtPosition\(price,/);
   assert.match(source, /delete visualizationCrosshairTimes\[pair\]/);
   assert.match(source, /data-chart-time/);
+  assert.match(source, /data-crosshair-price-label/);
+  assert.match(source, /data-chart-role="/);
+  assert.doesNotMatch(source, /data-crosshair-value/);
   assert.match(stylesheet, /touch-action:\s*none/);
+  assert.match(stylesheet, /\.visualization-crosshair-time[^}]*color:\s*#8cecff/);
+  assert.match(stylesheet, /\.score-short[^}]*#79404a/);
 });
 
 test("SVG charts render both crosshair axes inside their plotted data bounds", function () {
@@ -132,6 +137,25 @@ test("SVG charts render both crosshair axes inside their plotted data bounds", f
   assert.match(svg, /data-chart-viewbox-width="440"/);
   assert.match(svg, /data-chart-plot-start="5" data-chart-plot-end="325"/);
   assert.match(svg, /data-chart-min="9\.2" data-chart-max="20\.8"/);
+});
+
+test("only the primary close chart renders a right-side historical price label", function () {
+  const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
+    escapeHtml: function (value) { return String(value); }
+  });
+  const series = [{ values: [10, 20], color: "#fff", label: "Close", digits: 8, times: [100, 200] }];
+  const indicator = chartSvg(series, { label: "RSI", times: [100, 200], domainTimes: [100, 200] });
+  const price = chartSvg(series, {
+    label: "Price close", times: [100, 200], domainTimes: [100, 200], priceChart: true
+  });
+
+  assert.doesNotMatch(indicator, /data-crosshair-price-label/);
+  assert.doesNotMatch(indicator, /data-crosshair-value/);
+  assert.match(price, /data-chart-role="price"/);
+  assert.match(price, /data-crosshair-price-label/);
+  assert.match(price, /data-crosshair-price/);
+  assert.match(price, /x="435" y="12" text-anchor="end"/);
+  assert.doesNotMatch(price, /data-crosshair-value/);
 });
 
 test("partial API failures preserve other timeframes and missing contracts never delete saved pairs", async function () {
