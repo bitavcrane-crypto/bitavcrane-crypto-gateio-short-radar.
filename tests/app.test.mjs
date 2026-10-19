@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { evaluateShortStrategy } from "../short-strategy.mjs";
+import { buildMarketData, transitionSignal, validatePairList } from "../core.mjs";
+import { normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "../gate-api.mjs";
 
 const source = readFileSync(new URL("../app.mjs", import.meta.url), "utf8");
 const start = source.indexOf("function renderStrategyPanel(");
@@ -48,4 +50,107 @@ test("detected failed-high formation is not labelled a confirmed entry and repea
   assert.doesNotMatch(html, /SHORT ENTRY дозволено|SETUP CONFIRMED/);
   assert.equal((html.match(/унікальна причина/g) || []).length, 1);
   assert.equal((source.match(/renderStrategyPanel\(model\)/g) || []).length, 2);
+});
+
+function functionSource(name) {
+  const start = source.indexOf("function " + name + "(");
+  const end = source.indexOf("\nfunction ", start + 1);
+  return source.slice(start, end);
+}
+
+test("funding UI shows the exact normalized strategy rate alongside its raw source interval", function () {
+  const formatFunding = runInNewContext(functionSource("formatFunding") + "\nformatFunding;", {
+    formatNumber: function (number, digits) { return number.toFixed(digits); }
+  });
+  const data = { funding: {
+    raw: -0.000794, normalized: -0.001588, intervalSeconds: 14400, fetchedAt: 1710000000000
+  } };
+  assert.match(formatFunding(data), /-0.1588%\/8h.*raw -0.0794%\/4.0h/);
+  assert.match(formatFunding({ funding: { normalized: null } }), /UNKNOWN/);
+});
+
+test("entry alerts require every mandatory gate and state changes, including same-candle recovery", function () {
+  const api = runInNewContext(functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
+    events: [], MAX_EVENTS: 12, window: {}
+  });
+  const value = { confirmed: true, strategy: { allowed: true, dataReady: true, blockers: [], missing: [] } };
+  [
+    { allowed: false }, { dataReady: false }, { blockers: ["depth below threshold"] }, { missing: ["oiChanges.15m"] }
+  ].forEach(function (patch) {
+    api.notifyChange("Q_USDT", "setup", "entry", { confirmed: true, strategy: { ...value.strategy, ...patch } });
+  });
+  assert.equal(api.getEvents().length, 0);
+  const recovered = transitionSignal({
+    ...value, state: { key: "entry" }, data: { candles15: [{ time: 1710000000, close: 100 }] }
+  }, { state: { key: "setup" } }, 1710000000);
+  assert.equal(recovered.unchangedCandle, true);
+  api.notifyChange("Q_USDT", "setup", "entry", recovered);
+  assert.equal(api.getEvents().length, 1);
+  api.notifyChange("Q_USDT", "entry", "entry", recovered);
+  assert.equal(api.getEvents().length, 1);
+});
+
+test("failed refresh revokes confirmed, readiness and alert eligibility", function () {
+  const value = model();
+  value.confirmed = true;
+  value.strategy.allowed = true;
+  value.strategy.dataReady = true;
+  const models = { Q_USDT: value };
+  const markUnavailable = runInNewContext(functionSource("markPairUnavailable") + "\nmarkPairUnavailable;", {
+    models: models, pairErrors: {}, confirmationSettings: {},
+    evaluateShortConfirmation: function () { return { state: "unavailable" }; }
+  });
+  markUnavailable("Q_USDT", "HTTP 429");
+  assert.equal(models.Q_USDT.confirmed, false);
+  assert.equal(models.Q_USDT.strategy.allowed, false);
+  assert.equal(models.Q_USDT.strategy.readiness.ready, false);
+  assert.equal(models.Q_USDT.strategy.status, "DATA UNAVAILABLE");
+});
+
+test("partial API failures preserve other timeframes and missing contracts never delete saved pairs", async function () {
+  const now = Math.floor(Date.now() / 1000);
+  const models = {};
+  const pairs = ["Q_USDT", "MISSING_USDT"];
+  const start = source.indexOf("async function scan(");
+  const end = source.indexOf('\ndocument.getElementById("pair-form")', start);
+  const errors = {};
+  const globals = {
+    busy: false, pairs: pairs, contracts: [], models: models, pairErrors: {},
+    lastSuccessfulUpdate: null, minimumRiskReward: 1.5, confirmationSettings: {},
+    noticeNode: {}, connectionNode: {}, document: { getElementById: function () { return {}; } },
+    fetchContracts: async function () { return [{ name: "Q_USDT", status: "trading", funding_interval: 14400, quanto_multiplier: "1" }]; },
+    fetchTickers: async function () { return [{ contract: "Q_USDT", last: "100", funding_rate: "-0.000794", volume_24h_quote: "2000000" }]; },
+    fetchCandles: async function (_, interval) {
+      if (interval === "4h") throw new Error("HTTP 429");
+      const seconds = { "5m": 300, "15m": 900, "1h": 3600 }[interval];
+      return Array.from({ length: 4 }, function (_, index) {
+        return { t: now - (4 - index) * seconds, o: "100", h: "101", l: "99", c: "100", v: "10" };
+      });
+    },
+    fetchContractStats: async function () { return []; },
+    fetchOrderBook: async function () { throw new Error("HTTP 503"); },
+    mapLimited: async function (items, _, worker) { await Promise.all(items.map(worker)); },
+    normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker, buildMarketData, transitionSignal,
+    evaluateShortConfirmation: function () { return {}; },
+    markPairUnavailable: function (pair, reason) { errors[pair] = reason; },
+    notifyChange: function () { assert.fail("First unavailable scan must not announce a signal"); },
+    render: function () {}, refreshOpenVisualizations: function () {}, lastSuccessLabel: function () { return ""; }
+  };
+  const scan = runInNewContext(source.slice(start, end) + "\nscan;", globals);
+  await scan();
+  assert.equal(models.Q_USDT.data.qualities["15m"], "OK");
+  assert.equal(models.Q_USDT.data.qualities["1h"], "OK");
+  assert.equal(models.Q_USDT.strategy.readiness.timeframes["4h"].ready, false);
+  assert.ok(models.Q_USDT.strategy.missing.includes("candles.4h"));
+  assert.equal(models.Q_USDT.strategy.allowed, false);
+  assert.match(errors.MISSING_USDT, /пару збережено/);
+  assert.deepEqual(pairs, ["Q_USDT", "MISSING_USDT"]);
+});
+
+test("saved pairs are sanitized without deleting pairs absent from a partial contract response", function () {
+  const loadPairs = runInNewContext(functionSource("loadPairs") + "\nloadPairs;", {
+    PAIR_KEY: "pairs", DEFAULT_PAIRS: ["BTC_USDT"], validatePairList,
+    localStorage: { getItem: function () { return JSON.stringify(["q_usdt", "Q_USDT", "BAD!", null]); } }
+  });
+  assert.deepEqual(loadPairs(), ["Q_USDT"]);
 });

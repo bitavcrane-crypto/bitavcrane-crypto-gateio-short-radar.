@@ -1,9 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { classifyPriceOi, detectShortSetup, evaluateShortStrategy } from "../short-strategy.mjs";
+import { evaluateShortConfirmation } from "../indicator-confirmation.mjs";
 
 function candle(open, high, low, close, volume) {
   return { open: open, high: high, low: low, close: close, volume: volume === undefined ? 100 : volume };
+}
+
+function timestampCandles(candles, seconds, now = 1700000000) {
+  return candles.map(function (item, index) {
+    return Object.assign(item, { time: now - (candles.length - index) * seconds });
+  });
 }
 
 function validInput() {
@@ -14,26 +21,28 @@ function validInput() {
   return {
     nowSeconds: 1700000000,
     candles: {
-      "15m": candles15,
-      "1h": [
+      "15m": timestampCandles(candles15, 900),
+      "1h": timestampCandles([
         candle(100, 101, 99, 100), candle(100, 100.5, 98, 99),
         candle(99, 99.5, 97, 98), candle(98, 98.5, 96, 97)
-      ],
-      "4h": [
+      ], 3600),
+      "4h": timestampCandles([
         candle(104, 105, 103, 104), candle(103, 104, 102, 103),
         candle(102, 103, 101, 102), candle(101, 102, 100, 101)
-      ]
+      ], 14400)
     },
     changes: { "15m": -1, "1h": -2, "4h": -1 },
     oiChanges: { "15m": 1, "1h": 1.2, "4h": 1.5 },
     qualities: { "15m": "OK", "1h": "OK", "4h": "OK" },
-    stats: { quality: "OK", lsrAccount: 1.5, shortLiquidationUsd: 100, longLiquidationUsd: 100 },
+    stats: { quality: "OK", time: 1700000000, lsrAccount: 1.5, shortLiquidationUsd: 100, longLiquidationUsd: 100 },
     ticker: { quality: "OK", last: 97.3, volume24h: 10000000, fetchedAt: 1700000000000 },
-    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000, fetchedAt: 1700000000000 },
+    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000,
+      fetchedAt: 1700000000000, generatedAt: 1700000000 },
     volumeRatio: 2,
     indicators: { rsi: 45, macd: { histogram: -1 }, obvDivergence: true },
     fundingNormalized: 0.0005,
-    levels: { entry: 97.3, stop: 100.3, tp1: 91.3, tp2: 88.3, tp3: 85.3, atr: 2, valid: true },
+    levels: { entry: 97.3, stop: 100.3, tp1: 91.3, tp2: 88.3, tp3: 85.3, atr: 2, valid: true,
+      invalidation: 100.2, sourceTime: 1700000000 - 3600 },
     minimumRiskReward: 1.5
   };
 }
@@ -74,7 +83,7 @@ test("recognizes a failed retest after support breaks and gives it priority", fu
   candles[18] = candle(97.5, 98, 97.4, 97.7);
   candles[19] = candle(99.9, 100, 98, 98.5, 300);
   candles[19].time = input.nowSeconds - 900;
-  input.candles["15m"] = candles;
+  input.candles["15m"] = timestampCandles(candles, 900);
   const setup = detectShortSetup(candles);
   assert.equal(setup.type, "failed_retest");
   assert.equal(setup.startIndex, 19);
@@ -90,7 +99,7 @@ test("recognizes a failed local-high breakout only after price returns below its
   candles[16] = candle(100, 103, 99, 99.9);
   candles[16].time = input.nowSeconds - 3600;
   candles[19] = candle(100, 100.1, 98.8, 99, 300);
-  input.candles["15m"] = candles;
+  input.candles["15m"] = timestampCandles(candles, 900);
   const result = evaluateShortStrategy(input);
   assert.equal(result.setup.type, "failed_high_break");
   assert.equal(result.setup.level, 100.2);
@@ -499,6 +508,7 @@ test("shared detector tolerates absent, empty and malformed candles", function (
 test("normal market without generated levels does not imply missing market data", function () {
   const input = validInput();
   input.candles["15m"][19] = candle(100, 100.2, 99.8, 100, 300);
+  timestampCandles(input.candles["15m"], 900);
   input.levels = null;
   const result = evaluateShortStrategy(input);
   assert.equal(result.setup, null);
@@ -527,9 +537,135 @@ test("recalculated R/R remains finite or unavailable for extreme and precision-l
     tp1: Number.MIN_VALUE * 3, tp2: Number.MIN_VALUE * 2, tp3: Number.MIN_VALUE,
     valid: true, riskReward: Infinity
   };
-  assert.ok(Number.isFinite(evaluateShortStrategy(input).riskReward));
+  assert.equal(evaluateShortStrategy(input).riskReward, null);
+  assert.equal(evaluateShortStrategy(input).allowed, false);
   input.levels.stop = input.levels.entry + Number.MIN_VALUE;
   const result = evaluateShortStrategy(input);
   assert.equal(result.riskReward, null);
   assert.equal(result.allowed, false);
+});
+
+test("missing OI has explicit per-timeframe readiness and recovers without borrowing another interval", function () {
+  ["15m", "1h", "4h"].forEach(function (interval) {
+    const input = validInput();
+    input.oiChanges[interval] = null;
+    const result = evaluateShortStrategy(input);
+    assert.equal(result.allowed, false);
+    assert.equal(result.matrix[interval].key, "unavailable");
+    assert.deepEqual(result.readiness.timeframes[interval].missing, ["oiChanges." + interval]);
+    assert.equal(result.readiness.timeframes[interval].ready, false);
+    assert.equal(result.missingData, true);
+    input.oiChanges[interval] = 0;
+    assert.equal(evaluateShortStrategy(input).allowed, true);
+  });
+});
+
+test("liquidity thresholds are inclusive and high scores cannot bypass any execution limit", function () {
+  [
+    ["depthUsd", 9999.99, 10000, 10000.01, false],
+    ["spreadPercent", 0.19999, 0.2, 0.20001, true],
+    ["slippagePercent", 0.14999, 0.15, 0.15001, true]
+  ].forEach(function ([field, below, equal, above, maximum]) {
+    [below, equal, above].forEach(function (value, index) {
+      const input = validInput();
+      input.orderBook[field] = value;
+      const result = evaluateShortStrategy(input);
+      const passes = maximum ? index < 2 : index > 0;
+      assert.equal(result.allowed, passes, field + "=" + value);
+      assert.equal(result.liquidity.passed, passes);
+      assert.equal(result.setupConfirmed, true);
+      assert.equal(result.dataReady, true);
+      if (!passes) assert.match(result.blockers.join(" "), new RegExp(field));
+    });
+  });
+});
+
+test("R/R just below, equal to and above the configured minimum uses finalized prices", function () {
+  [1.4999, 1.5, 1.5001].forEach(function (ratio) {
+    const input = validInput();
+    input.levels.tp1 = input.levels.entry - (input.levels.stop - input.levels.entry) * ratio;
+    input.levels.riskReward = 999;
+    const result = evaluateShortStrategy(input);
+    assert.ok(Math.abs(result.riskReward - ratio) < 1e-12);
+    assert.equal(result.allowed, ratio >= 1.5);
+  });
+});
+
+test("published fees and estimated two-sided slippage reduce net R/R and may block gross-valid entries", function () {
+  const input = validInput();
+  input.takerFeeRate = 0.0005;
+  let result = evaluateShortStrategy(input);
+  assert.ok(result.netRiskReward < result.riskReward);
+  assert.equal(result.allowed, true);
+  input.levels.tp1 = input.levels.entry - (input.levels.stop - input.levels.entry) * 1.5;
+  result = evaluateShortStrategy(input);
+  assert.equal(result.riskReward, 1.5);
+  assert.ok(result.netRiskReward < 1.5);
+  assert.equal(result.allowed, false);
+  assert.match(result.blockers.join(" "), /Net Reward\/Risk/);
+});
+
+test("timestamps, incomplete candles and level provenance cannot be bypassed by OK quality labels", function () {
+  ["15m", "1h", "4h"].forEach(function (interval) {
+    [undefined, 1, 1700000000].forEach(function (time) {
+      const input = validInput();
+      input.candles[interval].at(-1).time = time;
+      const result = evaluateShortStrategy(input);
+      assert.equal(result.allowed, false);
+      assert.ok(result.missing.includes("candles." + interval));
+      assert.equal(result.matrix[interval].key, "unavailable");
+    });
+  });
+  [undefined, 1, 1700000001].forEach(function (time) {
+    const input = validInput();
+    input.stats.time = time;
+    assert.ok(evaluateShortStrategy(input).missing.includes("stats.time"));
+  });
+  ["sourceTime", "invalidation", "atr"].forEach(function (field) {
+    const input = validInput();
+    delete input.levels[field];
+    assert.equal(evaluateShortStrategy(input).allowed, false);
+  });
+  const input = validInput();
+  input.levels.entry = 98;
+  assert.equal(evaluateShortStrategy(input).allowed, false);
+});
+
+test("Q_USDT reported funding, positioning, depth and remote stop are individually explained", function () {
+  const input = validInput();
+  input.fundingNormalized = -0.000794 * 2;
+  input.stats.lsrAccount = 0.733;
+  input.orderBook = Object.assign(input.orderBook, { spreadPercent: 0.056, slippagePercent: 0.06, depthUsd: 3801 });
+  input.levels = { entry: 0.12214, stop: 0.22041433, tp1: 0.115456, tp2: 0.11, tp3: 0.10, atr: 0.002 };
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.allowed, false);
+  assert.equal(result.dataReady, true);
+  assert.match(result.blockers.join(" "), /depthUsd = 3801.*10000/);
+  assert.match(result.blockers.join(" "), /-0.1588%\/8h.*0.733/);
+  assert.match(result.blockers.join(" "), /stop\/рівні/);
+  input.fundingNormalized = -0.000794;
+  assert.equal(evaluateShortStrategy(input).flags.shortSqueezeRisk, false);
+});
+
+test("missing optional KDJ never masquerades as missing OI or vetoes the base strategy", function () {
+  const input = validInput();
+  const strategy = evaluateShortStrategy(input);
+  const confirmation = evaluateShortConfirmation(input.candles["15m"], {
+    state: { key: "entry" }, strategy: strategy
+  }, { kdj: { enabled: true, period: 100, ma1: 3, ma2: 3 } }, input.nowSeconds);
+  assert.ok(confirmation.unavailable.includes("KDJ"));
+  assert.notEqual(confirmation.state, "confirmed");
+  assert.equal(strategy.allowed, true);
+  assert.deepEqual(strategy.missing, []);
+});
+
+test("cached books cannot outlive their generation timestamp even while receipt time is fresh", function () {
+  const input = validInput();
+  input.orderBook.generatedAt = input.nowSeconds - 29;
+  assert.equal(evaluateShortStrategy(input).allowed, true);
+  input.nowSeconds += 10;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.allowed, false);
+  assert.ok(result.missing.includes("orderBook.generatedAt"));
+  assert.ok(!result.missing.includes("orderBook.fetchedAt"));
 });

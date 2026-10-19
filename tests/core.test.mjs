@@ -160,6 +160,8 @@ function levelCandles() {
       low: 0.124, close: 0.125, volume: 100 };
   });
   candles[8].low = 0.115456;
+  candles[12].low = 0.11;
+  candles[14].low = 0.10;
   candles[10].high = 0.22;
   candles[29] = { time: candles[29].time, open: 0.123, high: 0.1235,
     low: 0.1218, close: 0.12214, volume: 300 };
@@ -191,6 +193,8 @@ test("levels require a recent formation and structural support below entry", fun
   assert.equal(calculateLevels(levelCandles(), { startIndex: 10 }), null);
   const candles = levelCandles();
   candles[8].low = 0.124;
+  candles[12].low = 0.124;
+  candles[14].low = 0.124;
   const result = calculateLevels(candles, { startIndex: 26 });
   assert.equal(result.valid, false);
   assert.match(result.reason, /підтримки/);
@@ -219,7 +223,7 @@ test("contract stats flag duplicate, bad timestamp and invalid values", function
   assert.equal(normalizeContractStats([Object.assign({}, valid, { open_interest: "-1" })], 1710000000).quality, "SUSPECT");
 });
 
-test("contract stats prefer Gate's explicit USDT liquidation aggregates", function () {
+test("contract stats use only documented quote-currency liquidation aggregates", function () {
   const normalized = normalizeContractStats([{
     time: 1710000000,
     open_interest: "10",
@@ -228,8 +232,8 @@ test("contract stats prefer Gate's explicit USDT liquidation aggregates", functi
     short_liq_usd: "5",
     short_liq_usd_new: "0"
   }], 1710000000);
-  assert.equal(normalized.rows[0].longLiquidationUsd, 25);
-  assert.equal(normalized.rows[0].shortLiquidationUsd, 0);
+  assert.equal(normalized.rows[0].longLiquidationUsd, 10);
+  assert.equal(normalized.rows[0].shortLiquidationUsd, 5);
 });
 
 test("unknown funding interval does not normalize funding", function () {
@@ -350,16 +354,18 @@ test("a support break with a distant stop is blocked even when the older setup c
     candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, -0.005), "4h": steady(14400, 50, -0.005) },
     ticker: { quality: "OK", last: Number(rows[59].c), volume24h: 10000000, funding: 0.0005, fetchedAt: now * 1000 },
     stats: { rows: statsRows, quality: "OK" },
-    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000, fetchedAt: now * 1000 },
+    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000,
+      fetchedAt: now * 1000, generatedAt: now },
     fundingIntervalSeconds: 28800,
     nowSeconds: now
   });
   assert.notEqual(model.state.key, "entry");
   assert.match(model.strategy.blockers.join(" "), /Stop надто далекий/);
-  assert.equal(model.levels.valid, false);
+  assert.equal(model.levels, null);
   assert.equal(model.strategy.allowed, false);
-  assert.ok(model.levels.stop > model.levels.entry);
-  assert.ok(model.levels.tp1 < model.levels.entry);
+  const rejected = calculateLevels(model.data.candles15);
+  assert.ok(rejected.stop > rejected.entry);
+  assert.ok(rejected.tp1 < rejected.entry);
 });
 
 test("same-candle refresh rechecks blockers immediately and invalidation cancels a setup", function () {
@@ -411,4 +417,110 @@ test("pair list validates duplicates and add/remove behavior", function () {
   assert.deepEqual(added.list, ["BTC_USDT", "ETH_USDT"]);
   assert.equal(addPair(added.list, "NOPE_USDT", allowed).error !== null, true);
   assert.deepEqual(removePair(added.list, "BTC_USDT"), ["ETH_USDT"]);
+});
+
+test("malformed scalar types never become measured candle prices or volumes", function () {
+  [true, false, [], {}, " ", "NaN", "Infinity"].forEach(function (value) {
+    const rows = [{ t: 1710000000, o: value, h: "2", l: "1", c: "1", v: "10" }];
+    assert.equal(normalizeCandles(rows, "15m", 1710000900).quality, "SUSPECT");
+  });
+});
+
+test("candles become stale as soon as an expected completed interval is absent", function () {
+  const rows = [{ t: 1710000000, o: "1", h: "2", l: "1", c: "1", v: "10" }];
+  assert.equal(normalizeCandles(rows, "15m", 1710001799).quality, "OK");
+  assert.equal(normalizeCandles(rows, "15m", 1710001800).quality, "STALE");
+});
+
+test("OI refuses unequal endpoint offsets and cannot borrow past a missing latest field", function () {
+  const unequal = { quality: "OK", rows: [
+    { time: 600, openInterest: 100 }, { time: 1202, openInterest: 120 }
+  ] };
+  assert.equal(calculateContractMetrics(unequal, { "15m": 1500 }).oiChanges["15m"], null);
+  const missing = { quality: "OK", rows: [
+    { time: 600, openInterest: 100 }, { time: 1400, openInterest: 120 },
+    { time: 1500, openInterest: null }
+  ] };
+  assert.equal(calculateContractMetrics(missing, { "15m": 1500 }).oiChanges["15m"], null);
+});
+
+test("Q_USDT funding is normalized once with source, units, interval and receipt timestamp", function () {
+  [14400, 28800].forEach(function (interval) {
+    const model = buildMarketData({
+      candles: {}, stats: { rows: [], quality: "NO DATA" },
+      ticker: { funding: -0.000794, fetchedAt: 1710000000000 },
+      fundingIntervalSeconds: interval, nowSeconds: 1710000000
+    });
+    assert.equal(model.data.fundingNormalized, -0.000794 * 28800 / interval);
+    assert.equal(model.data.funding.normalized, model.data.fundingNormalized);
+    assert.equal(model.data.funding.raw, -0.000794);
+    assert.equal(model.data.funding.intervalSeconds, interval);
+    assert.equal(model.data.funding.fetchedAt, 1710000000000);
+    assert.equal(model.data.funding.unit, "decimal");
+  });
+});
+
+test("targets are distinct confirmed supports, never invented ATR extensions", function () {
+  const candles = levelCandles();
+  let levels = calculateLevels(candles, { startIndex: 26 });
+  assert.deepEqual([levels.tp1, levels.tp2, levels.tp3], [0.115456, 0.11, 0.10]);
+  candles[12].low = 0.124;
+  candles[14].low = 0.124;
+  levels = calculateLevels(candles, { startIndex: 26 });
+  assert.equal(levels.valid, false);
+  assert.equal(levels.tp2, null);
+  assert.match(levels.reason, /трьох/);
+});
+
+test("cancellation revokes confirmed entry consistently across model and strategy", function () {
+  const prior = { state: { key: "entry" }, levels: { stop: 110 } };
+  const current = {
+    state: { key: "entry" }, confirmed: true,
+    data: { candles15: [{ time: 1710000000, close: 111 }] },
+    strategy: { status: "SHORT ENTRY", allowed: true, blockers: [] }
+  };
+  const result = transitionSignal(current, prior, 0);
+  assert.equal(result.state.key, "cancelled");
+  assert.equal(result.confirmed, false);
+  assert.equal(result.strategy.status, "NO TRADE");
+  assert.equal(result.strategy.allowed, false);
+});
+
+test("complete closed-candle and stats pipeline permits entry only after every mandatory gate passes", function () {
+  const now = 1710000000;
+  const raw = function (seconds, count, declining) {
+    return Array.from({ length: count }, function (_, index) {
+      const close = declining ? 102 - index * 0.1 : 100;
+      return { t: now - (count - index) * seconds, o: String(close + (declining ? 0.1 : 0)),
+        h: String(close + 0.2), l: String(close - 0.2), c: String(close), v: "100" };
+    });
+  };
+  const main = raw(900, 80, false);
+  main[65].l = "91.3";
+  main[68].l = "88.3";
+  main[71].l = "85.3";
+  Object.assign(main[79], { o: "100", h: "100.2", l: "97.1", c: "97.3", v: "300" });
+  const input = {
+    candles: { "5m": raw(300, 80, false), "15m": main, "1h": raw(3600, 20, true), "4h": raw(14400, 20, true) },
+    stats: normalizeContractStats(Array.from({ length: 100 }, function (_, index) {
+      return { time: now - (99 - index) * 300, open_interest: String(1000 + index),
+        lsr_account: "1.5", long_liq_usd: "0", short_liq_usd: "0" };
+    }), now),
+    ticker: { quality: "OK", last: 97.3, funding: 0.0005, volume24h: 10000000, fetchedAt: now * 1000 },
+    orderBook: { quality: "OK", depthUsd: 50000, spreadPercent: 0.1, slippagePercent: 0.05,
+      fetchedAt: now * 1000, generatedAt: now },
+    fundingIntervalSeconds: 28800, nowSeconds: now, minimumRiskReward: 1.5, takerFeeRate: 0.0005
+  };
+  const model = buildMarketData(input);
+  assert.deepEqual(model.strategy.missing, []);
+  assert.deepEqual(model.strategy.blockers, []);
+  assert.equal(model.strategy.allowed, true);
+  assert.equal(model.confirmed, true);
+  assert.equal(model.state.key, "entry");
+  assert.ok(model.strategy.netRiskReward >= 1.5);
+  input.orderBook.depthUsd = 9999;
+  const blocked = buildMarketData(input);
+  assert.equal(blocked.strategy.setupConfirmed, true);
+  assert.equal(blocked.strategy.allowed, false);
+  assert.notEqual(blocked.state.key, "entry");
 });
