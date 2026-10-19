@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151f">
+  <title>Gate.io Pump → SHORT Radar</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">GATE.IO FUTURES · USDT</p>
+        <h1>Pump <span>→</span> SHORT Radar</h1>
+        <p class="subheading">Памп · виснаження · підтвердження розвороту</p>
+      </div>
+      <div id="connection" class="connection" role="status">Підключення…</div>
+    </header>
+
+    <section class="toolbar" aria-label="Керування парами">
+      <form id="pair-form" class="pair-form">
+        <label class="visually-hidden" for="pair-input">Ф'ючерсний контракт</label>
+        <input id="pair-input" name="pair" autocomplete="off" placeholder="Наприклад, RAVE_USDT" maxlength="32">
+        <button type="submit">＋ Додати пару</button>
+      </form>
+      <div class="toolbar-meta">
+        <span id="pair-count">0 пар</span>
+        <span id="updated-at">Очікування даних</span>
+        <button id="notify-button" class="subtle-button" type="button">Увімкнути сповіщення</button>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section id="cards" class="cards" aria-live="polite"></section>
+    <section id="events" class="events" aria-label="Останні зміни стану">
+      <h2>Зміни стану</h2>
+      <ul id="event-list"><li class="empty-event">Нових змін поки немає.</li></ul>
+    </section>
+    <footer>
+      <p>Оцінка моделі, не ймовірність прибутку. Жоден сигнал не гарантує результату.</p>
+      <p>15m — основний сигнал · 5m — ранній рух · 1h/4h — контекст · лише закриті свічки</p>
+    </footer>
+  </main>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>
