@@ -6,6 +6,7 @@ import {
   evaluateShortConfirmation,
   normalizeConfirmationSettings
 } from "../indicator-confirmation.mjs";
+import { fetchCandles } from "../gate-api.mjs";
 
 function candles(count, nowSeconds, direction) {
   const rows = [];
@@ -108,6 +109,25 @@ test("confirmation uses closed candles only", function () {
   assert.equal(withOpen.closedCandleTime, closed[closed.length - 1].time);
 });
 
+test("changing one setting recalculates that indicator and reuses the other results", function () {
+  const nowSeconds = 1701000000;
+  const rows = candles(50, nowSeconds, "down");
+  const original = evaluateShortConfirmation(rows, { state: { key: "pump" } },
+    DEFAULT_CONFIRMATION_SETTINGS, nowSeconds);
+  const changed = evaluateShortConfirmation(rows, { state: { key: "pump" } }, {
+    rci: { enabled: true, period: 12 },
+    obv: DEFAULT_CONFIRMATION_SETTINGS.obv,
+    ema: DEFAULT_CONFIRMATION_SETTINGS.ema,
+    kdj: DEFAULT_CONFIRMATION_SETTINGS.kdj
+  }, nowSeconds, original);
+  ["OBV", "EMA", "KDJ"].forEach(function (name) {
+    assert.equal(changed.indicators.find(function (item) { return item.key === name; }),
+      original.indicators.find(function (item) { return item.key === name; }));
+  });
+  assert.notEqual(changed.indicators.find(function (item) { return item.key === "RCI"; }),
+    original.indicators.find(function (item) { return item.key === "RCI"; }));
+});
+
 test("insufficient history and missing OBV volume are reported without throwing", function () {
   const nowSeconds = 1701000000;
   const shortHistory = evaluateShortConfirmation(candles(2, nowSeconds, "up"),
@@ -143,6 +163,20 @@ test("invalid settings fall back safely and calculation exceptions remain isolat
     { state: { key: "pump" } }, throwingSettings, nowSeconds);
   assert.equal(failed.state, "unavailable");
   assert.match(failed.quality, /базовий радар працює окремо/);
+});
+
+test("an API error rejects only its request and leaves supplemental analysis non-fatal", async function () {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async function () { return { ok: false, status: 503 }; };
+  try {
+    await assert.rejects(fetchCandles("CONFIRMATION_ERROR_TEST_USDT", "15m"), /HTTP 503/);
+    const result = evaluateShortConfirmation([], { state: { key: "incomplete" } },
+      DEFAULT_CONFIRMATION_SETTINGS, 1701000000);
+    assert.equal(result.state, "unavailable");
+    assert.equal(result.enabled, 4);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("bearish overbought readings cannot confirm SHORT without the base entry", function () {

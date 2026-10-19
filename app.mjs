@@ -272,7 +272,7 @@ function updateConfirmationSettings(settings) {
     if (!model || !model.data) return;
     models[pair] = Object.assign({}, model, {
       indicatorConfirmation: evaluateShortConfirmation(model.data.candles15, model, settings,
-        Math.floor(Date.now() / 1000))
+        Math.floor(Date.now() / 1000), model.indicatorConfirmation)
     });
   });
   render();
@@ -298,8 +298,8 @@ function readConfirmationControls() {
     settings[path[0]][path[1]] = input.value;
   });
   const normalized = normalizeConfirmationSettings(settings);
-  syncConfirmationControls();
   updateConfirmationSettings(normalized.settings);
+  syncConfirmationControls();
   if (normalized.issues.length) {
     noticeNode.hidden = false;
     noticeNode.textContent = normalized.issues.join(" · ");
@@ -360,7 +360,7 @@ async function scan() {
         if (!signal.unchangedCandle && prior) notifyChange(pair, prior.state.key, signal.state.key);
         models[pair] = Object.assign({}, signal, {
           indicatorConfirmation: evaluateShortConfirmation(signal.data.candles15, signal, confirmationSettings,
-            Math.floor(Date.now() / 1000))
+            Math.floor(Date.now() / 1000), prior && prior.indicatorConfirmation)
         });
         delete pairErrors[pair];
       } catch (error) {

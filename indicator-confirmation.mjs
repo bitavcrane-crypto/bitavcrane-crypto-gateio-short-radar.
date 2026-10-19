@@ -148,7 +148,12 @@ function calculateKdj(candles, period) {
   };
 }
 
-function indicator(name, enabled, calculate, candles, settings) {
+function sameSettings(first, second) {
+  return first && second && Object.keys(second).every(function (key) { return first[key] === second[key]; });
+}
+
+function indicator(name, enabled, calculate, candles, settings, previous, sameCandle) {
+  if (sameCandle && sameSettings(previous && previous.config, settings) && previous.result) return previous.result;
   if (!enabled) return { key: name, status: "disabled", direction: null, value: null, detail: "вимкнено" };
   try {
     const result = calculate(candles, settings);
@@ -178,7 +183,7 @@ function qualityLabel(bearish, bullish, unavailable, enabled) {
   return "Низька · ведмежого підтвердження немає";
 }
 
-export function evaluateShortConfirmation(candles, model, settings, nowSeconds) {
+export function evaluateShortConfirmation(candles, model, settings, nowSeconds, previousConfirmation) {
   try {
     const normalized = normalizeSettings(settings);
     const closedCandles = Number.isFinite(nowSeconds) && Array.isArray(candles) ?
@@ -189,11 +194,26 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds) 
           candle.low <= Math.min(candle.open, candle.close);
       }).sort(function (a, b) { return a.time - b.time; }) : [];
     const active = normalized.settings;
+    const candleTime = closedCandles.length ? closedCandles[closedCandles.length - 1].time : null;
+    const priorByName = {};
+    if (previousConfirmation && Array.isArray(previousConfirmation.indicators)) {
+      previousConfirmation.indicators.forEach(function (result) {
+        priorByName[result.key.toLowerCase()] = {
+          result: result,
+          config: previousConfirmation.settings && previousConfirmation.settings[result.key.toLowerCase()]
+        };
+      });
+    }
+    const sameCandle = previousConfirmation && previousConfirmation.closedCandleTime === candleTime;
     const results = [
-      indicator("RCI", active.rci.enabled, function (list) { return calculateRci(list, active.rci.period); }, closedCandles),
-      indicator("OBV", active.obv.enabled, function (list) { return calculateObv(list, active.obv.lookback); }, closedCandles),
-      indicator("EMA", active.ema.enabled, function (list) { return calculateEma(list, active.ema.fast, active.ema.slow); }, closedCandles),
-      indicator("KDJ", active.kdj.enabled, function (list) { return calculateKdj(list, active.kdj.period); }, closedCandles)
+      indicator("RCI", active.rci.enabled, function (list) { return calculateRci(list, active.rci.period); }, closedCandles,
+        active.rci, priorByName.rci, sameCandle),
+      indicator("OBV", active.obv.enabled, function (list) { return calculateObv(list, active.obv.lookback); }, closedCandles,
+        active.obv, priorByName.obv, sameCandle),
+      indicator("EMA", active.ema.enabled, function (list) { return calculateEma(list, active.ema.fast, active.ema.slow); }, closedCandles,
+        active.ema, priorByName.ema, sameCandle),
+      indicator("KDJ", active.kdj.enabled, function (list) { return calculateKdj(list, active.kdj.period); }, closedCandles,
+        active.kdj, priorByName.kdj, sameCandle)
     ];
     const enabled = results.filter(function (result) { return result.status !== "disabled"; }).length;
     const bearish = results.filter(function (result) { return result.direction === "bearish"; }).length;
@@ -243,6 +263,7 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds) 
       unavailable: results.filter(function (result) { return result.status === "unavailable"; }).map(function (result) { return result.key; }),
       conflict: conflict,
       indicators: results,
+      settings: active,
       reasons: reasons,
       closedCandleTime: closedCandles.length ? closedCandles[closedCandles.length - 1].time : null
     };
