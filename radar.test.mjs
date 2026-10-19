@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeContract, normalizeCandles, relativeVolume } from "./radar.mjs";
+import { analyzeContract, normalizeCandles, relativeVolume, toNumber } from "./radar.mjs";
 
 const now = Date.now();
 
@@ -49,6 +49,12 @@ test("relative volume compares the latest completed candle with prior candles", 
   assert.equal(relativeVolume(candles), 3);
 });
 
+test("missing numeric API values remain unavailable", () => {
+  assert.equal(toNumber(null), null);
+  assert.equal(toNumber(""), null);
+  assert.equal(toNumber("0"), 0);
+});
+
 test("overheating alone does not qualify a short candidate", () => {
   const result = analyzeContract({
     contract: "TEST_USDT",
@@ -87,6 +93,8 @@ test("a closed bearish support break qualifies a pumped and overheated contract"
   assert.ok(result.reasons.some((reason) => reason.includes("пробила локальну підтримку")));
   assert.ok(result.support > result.price);
   assert.ok(result.invalidation > result.price);
+  assert.equal(result.score, Object.values(result.scoreFactors).reduce((sum, value) => sum + value, 0));
+  assert.ok(result.score <= 100);
 });
 
 test("open-interest changes are calculated in chronological order", () => {

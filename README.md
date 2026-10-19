@@ -16,6 +16,7 @@ Open `http://localhost:8000`. A local server is needed because browsers generall
 
 - Loads Gate.io USDT futures tickers and scans active contracts in rotation for closed 15-minute candles. Candles are requested with bounded concurrency; a refresh can take time for a large market list.
 - Uses 15-minute candles as its primary timeframe and completed 5-minute candles as an additional confirmation when available. 1-hour and 4-hour changes are calculated from the 15-minute candle history.
+- Requests 5-minute confirmation and open-interest history for up to 20 highest-ranked pumped/watchlist contracts per scan cycle. Other contracts show these supplemental metrics as not requested or unavailable.
 - Shows the pump move, relative volume, MACD momentum, OBV confirmation, upper-wick rejection, local support, funding, and open-interest change when that data is returned.
 - Separates overheated/weakening setups from a reversal watch and a short candidate. A candidate requires a closed-candle support break plus a bearish close; heat alone does not qualify.
 - Displays the support-break trigger and recent-high invalidation, a transparent 0–100 score, reasons, and outstanding confirmation.

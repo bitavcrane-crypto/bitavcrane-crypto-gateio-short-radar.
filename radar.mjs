@@ -2,6 +2,7 @@ export const API_BASE = "https://fx-api.gateio.ws/api/v4";
 export const CANDLE_INTERVAL_MS = 15 * 60 * 1000;
 
 export function toNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -173,13 +174,13 @@ export function analyzeContract({
   if (isOverheated && !supportBreak) pending.push(`Очікується закриття нижче підтримки ${support.toPrecision(6)}.`);
 
   const scoreFactors = {
-    pump: isPump ? 20 : 0,
+    pump: isPump ? 15 : 0,
     volume: volumeRatio !== null && volumeRatio >= 1.5 ? 15 : 0,
-    overheated: isOverheated ? 20 : 0,
-    weakness: Math.min(weaknessSignals, 4) * 8,
+    overheated: isOverheated ? 15 : 0,
+    weakness: Math.min(weaknessSignals, 4) * 7,
     supportBreak: supportBreak ? 20 : 0,
-    funding: fundingRate !== null && fundingRate >= 0.0005 ? 5 : 0,
-    openInterest: oiPriceDivergence ? 5 : 0,
+    funding: fundingRate !== null && fundingRate >= 0.0005 ? 4 : 0,
+    openInterest: oiPriceDivergence ? 3 : 0,
   };
   const score = Math.min(100, Object.values(scoreFactors).reduce((sum, value) => sum + value, 0));
   const status = shortCandidate

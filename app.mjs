@@ -154,7 +154,7 @@ function mappedState(analysis) {
     </div>
     <div class="metric"><strong class="${(analysis?.change4h || 0) >= 0 ? "positive" : "negative"}">${formatPercent(analysis?.change4h)}</strong><small>1г ${formatPercent(analysis?.change1h)}</small></div>
     <div class="metric"><strong>${analysis?.volumeRatio === null || analysis?.volumeRatio === undefined ? "—" : `${analysis.volumeRatio.toFixed(2)}×`}</strong><small>від середнього · 15хв</small></div>
-    <div class="metric-stack"><span>OI ${formatPercent(analysis?.oiChange)}</span><span>FUND ${formatFunding(analysis?.fundingRate)}</span><small>${analysis?.oiChange === null || analysis?.oiChange === undefined ? "OI: не надано" : "Gate.io contract_stats"}</small></div>
+    <div class="metric-stack"><span>OI ${formatPercent(analysis?.oiChange)}</span><span>FUND ${formatFunding(analysis?.fundingRate)}</span><small>${analysis?.oiChange === null || analysis?.oiChange === undefined ? "OI: не отримано / не запитувався" : "Gate.io contract_stats"}</small></div>
     <div class="signals">
       <span class="signal ${analysis?.isOverheated ? "active" : ""}">Перегрів</span>
       <span class="signal ${analysis?.weaknessSignals >= 2 ? "active" : ""}">Виснаження ${analysis?.weaknessSignals ?? 0}/5</span>
@@ -168,7 +168,7 @@ function mappedState(analysis) {
       <div><strong>Фактичні ознаки</strong><ul>${(analysis?.reasons?.length ? analysis.reasons : ["Підтверджених ознак поки немає."]).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></div>
       <div><strong>Що потрібно далі</strong><ul>${(analysis?.pending?.length ? analysis.pending : ["Сетап підтверджено; рівні слід перевірити вручну."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
       <div><strong>Бал SHORT · внесок</strong><ul><li>Памп ${analysis?.scoreFactors?.pump ?? 0} · обсяг ${analysis?.scoreFactors?.volume ?? 0} · перегрів ${analysis?.scoreFactors?.overheated ?? 0}</li><li>Ослаблення ${analysis?.scoreFactors?.weakness ?? 0} · пробій ${analysis?.scoreFactors?.supportBreak ?? 0}</li><li>Funding ${analysis?.scoreFactors?.funding ?? 0} · OI ${analysis?.scoreFactors?.openInterest ?? 0} балів</li><li class="source-note">Оцінка не є ймовірністю чи гарантією прибутку.</li></ul></div>
-      <div><strong>Дані та оновлення</strong><ul><li>${escapeHtml(analysis?.sources?.price || "Джерело: Gate.io REST · свічки 15хв")}</li><li>${escapeHtml(analysis?.sources?.volume || "Джерело: Gate.io REST · обсяг свічок")}</li><li>${analysis?.sources?.funding ? escapeHtml(analysis.sources.funding) : "Funding: недоступний"}</li><li>${analysis?.sources?.oi ? escapeHtml(analysis.sources.oi) : "OI: недоступний"}</li><li>Скановано: ${localTime(analysis?.lastUpdated)} · свічка: ${localTime(analysis?.latestCandleTime)}</li></ul></div>
+      <div><strong>Дані та оновлення</strong><ul><li>${escapeHtml(analysis?.sources?.price || "Джерело: Gate.io REST · свічки 15хв")}</li><li>${escapeHtml(analysis?.sources?.volume || "Джерело: Gate.io REST · обсяг свічок")}</li><li>${analysis?.sources?.funding ? escapeHtml(analysis.sources.funding) : "Funding: недоступний"}</li><li>${analysis?.sources?.oi ? escapeHtml(analysis.sources.oi) : "OI: відсутній або не запитувався для цієї пари"}</li><li>Скановано: ${localTime(analysis?.lastUpdated)} · свічка: ${localTime(analysis?.latestCandleTime)}</li></ul></div>
     </div>`;
 }
 
