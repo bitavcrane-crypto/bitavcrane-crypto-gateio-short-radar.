@@ -354,7 +354,8 @@ test("a support break with a distant stop is blocked even when the older setup c
     candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, -0.005), "4h": steady(14400, 50, -0.005) },
     ticker: { quality: "OK", last: Number(rows[59].c), volume24h: 10000000, funding: 0.0005, fetchedAt: now * 1000 },
     stats: { rows: statsRows, quality: "OK" },
-    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000, fetchedAt: now * 1000 },
+    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000,
+      fetchedAt: now * 1000, generatedAt: now },
     fundingIntervalSeconds: 28800,
     nowSeconds: now
   });
@@ -506,7 +507,8 @@ test("complete closed-candle and stats pipeline permits entry only after every m
         lsr_account: "1.5", long_liq_usd: "0", short_liq_usd: "0" };
     }), now),
     ticker: { quality: "OK", last: 97.3, funding: 0.0005, volume24h: 10000000, fetchedAt: now * 1000 },
-    orderBook: { quality: "OK", depthUsd: 50000, spreadPercent: 0.1, slippagePercent: 0.05, fetchedAt: now * 1000 },
+    orderBook: { quality: "OK", depthUsd: 50000, spreadPercent: 0.1, slippagePercent: 0.05,
+      fetchedAt: now * 1000, generatedAt: now },
     fundingIntervalSeconds: 28800, nowSeconds: now, minimumRiskReward: 1.5, takerFeeRate: 0.0005
   };
   const model = buildMarketData(input);

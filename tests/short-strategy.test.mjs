@@ -36,7 +36,8 @@ function validInput() {
     qualities: { "15m": "OK", "1h": "OK", "4h": "OK" },
     stats: { quality: "OK", time: 1700000000, lsrAccount: 1.5, shortLiquidationUsd: 100, longLiquidationUsd: 100 },
     ticker: { quality: "OK", last: 97.3, volume24h: 10000000, fetchedAt: 1700000000000 },
-    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000, fetchedAt: 1700000000000 },
+    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000,
+      fetchedAt: 1700000000000, generatedAt: 1700000000 },
     volumeRatio: 2,
     indicators: { rsi: 45, macd: { histogram: -1 }, obvDivergence: true },
     fundingNormalized: 0.0005,
@@ -656,4 +657,15 @@ test("missing optional KDJ never masquerades as missing OI or vetoes the base st
   assert.notEqual(confirmation.state, "confirmed");
   assert.equal(strategy.allowed, true);
   assert.deepEqual(strategy.missing, []);
+});
+
+test("cached books cannot outlive their generation timestamp even while receipt time is fresh", function () {
+  const input = validInput();
+  input.orderBook.generatedAt = input.nowSeconds - 29;
+  assert.equal(evaluateShortStrategy(input).allowed, true);
+  input.nowSeconds += 10;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.allowed, false);
+  assert.ok(result.missing.includes("orderBook.generatedAt"));
+  assert.ok(!result.missing.includes("orderBook.fetchedAt"));
 });

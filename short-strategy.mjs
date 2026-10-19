@@ -215,6 +215,9 @@ function requiredData(input) {
   require(finite(ticker.last) && ticker.last > 0, "ticker.last");
   require(nonnegative(ticker.volume24h), "ticker.volume24h");
   require(book.quality === "OK", "orderBook.quality");
+  require(finite(book.generatedAt) && book.generatedAt > 0 &&
+    input.nowSeconds - book.generatedAt >= -5 && input.nowSeconds - book.generatedAt <= 30,
+  "orderBook.generatedAt");
   ["depthUsd", "spreadPercent", "slippagePercent"].forEach(function (field) {
     require(nonnegative(book[field]), "orderBook." + field);
   });
