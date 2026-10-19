@@ -125,6 +125,16 @@ test("visualization crosshair shares pointer interaction across charts and reset
   assert.match(stylesheet, /\.score-short[^}]*#79404a/);
 });
 
+test("OI chart timeframe is independently saved and plotted as documented total open interest", function () {
+  assert.match(source, /gate-short-radar-oi-visualization-state/);
+  assert.match(source, /data-oi-visualization-timeframe=/);
+  assert.match(source, /setOpenInterestInterval\(openInterestSelections, pair, select\.value\)/);
+  assert.match(source, /buildOpenInterestSeries\(model\.data\.stats\.history, openInterestInterval/);
+  assert.match(source, /label: "TOTAL OI · contracts"/);
+  assert.match(source, /lsr_account та lsr_taker — співвідношення, не окремі LONG\/SHORT OI/);
+  assert.match(source, /times: oiTimes, domainTimes: oiTimes/);
+});
+
 test("SVG charts render both crosshair axes inside their plotted data bounds", function () {
   const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
     escapeHtml: function (value) { return String(value); }

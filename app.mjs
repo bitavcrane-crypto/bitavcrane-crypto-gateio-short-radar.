@@ -2,14 +2,20 @@ import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySign
 import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
+import { buildOpenInterestSeries } from "./oi-visualization.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
-import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
+import {
+  getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
+  normalizeVisualizationSelections, removeVisualizationContract, setOpenInterestInterval,
+  setVisualizationInterval, OPEN_INTEREST_INTERVALS, VISUALIZATION_INTERVALS
+} from "./visualization-state.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
 const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
 const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
 const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
+const OPEN_INTEREST_STATE_KEY = "gate-short-radar-oi-visualization-state";
 const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
@@ -31,6 +37,7 @@ let pairErrors = {};
 let events = [];
 let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
+let openInterestSelections = loadOpenInterestSelections();
 let visualizationData = {};
 let visualizationCrosshairTimes = {};
 let minimumRiskReward = loadMinimumRiskReward();
@@ -76,6 +83,14 @@ function loadVisualizationSelections() {
   }
 }
 
+function loadOpenInterestSelections() {
+  try {
+    return normalizeOpenInterestSelections(JSON.parse(localStorage.getItem(OPEN_INTEREST_STATE_KEY) || "{}"));
+  } catch (error) {
+    return {};
+  }
+}
+
 function saveVisualizationSelections() {
   try {
     localStorage.setItem(VISUALIZATION_STATE_KEY, JSON.stringify(visualizationSelections));
@@ -85,8 +100,21 @@ function saveVisualizationSelections() {
   }
 }
 
+function saveOpenInterestSelections() {
+  try {
+    localStorage.setItem(OPEN_INTEREST_STATE_KEY, JSON.stringify(openInterestSelections));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Вибір OI таймфрейму не вдалося зберегти у localStorage.";
+  }
+}
+
 function selectedVisualizationInterval(contract) {
   return getVisualizationInterval(visualizationSelections, contract);
+}
+
+function selectedOpenInterestInterval(contract) {
+  return getOpenInterestInterval(openInterestSelections, contract);
 }
 
 function currentChartSettings() {
@@ -364,6 +392,7 @@ function hasBullishFourHourTrend(pair, interval) {
 
 function renderIndicatorVisualization(pair) {
   const interval = selectedVisualizationInterval(pair);
+  const openInterestInterval = selectedOpenInterestInterval(pair);
   const data = visualizationData[pair] && visualizationData[pair][interval];
   const cacheTime = data && data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString("uk-UA") : "немає";
   const lastCandle = data && data.candles && data.candles.length ?
@@ -482,10 +511,30 @@ function renderIndicatorVisualization(pair) {
     (model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
-      const oiHistory = model.data.stats.history.filter(function (row) {
-        return row.time >= chartStartTime && row.time <= chartEndTime;
-      });
-      return '<div class="indicator-chart-grid market-chart-grid">' +
+    const oiView = buildOpenInterestSeries(model.data.stats.history, openInterestInterval,
+      Math.floor(Date.now() / 1000));
+    const oiHistory = oiView.rows;
+    const oiTimes = oiHistory.map(function (row) { return row.time; });
+    const oiValues = oiHistory.map(function (row) { return row.openInterest; });
+    const oiPoints = oiValues.filter(function (value) { return Number.isFinite(value); }).length;
+    const oiLastTime = oiHistory.filter(function (row) { return Number.isFinite(row.openInterest); })
+      .map(function (row) { return row.time; }).pop();
+    const oiQuality = model.data.stats.quality;
+    const oiWarning = oiQuality === "OK" ? "" :
+      '<p class="chart-empty">Стан джерела OI: ' + escapeHtml(oiQuality) +
+        (Number.isFinite(oiLastTime) ? " · остання точка: " +
+          escapeHtml(new Date(oiLastTime * 1000).toLocaleString("uk-UA")) : "") + ".</p>";
+    const oiContent = oiView.status !== "ok" ?
+      '<p class="chart-empty">Немає завершених історичних точок OI для цього інтервалу.</p>' :
+        (oiPoints < 2 ? '<p class="chart-empty">Для лінії потрібно щонайменше дві завершені точки; доступно: ' +
+          oiPoints + ".</p>" : "") +
+        chartSvg([{
+          values: oiValues, color: "#49d4a5", label: "TOTAL OI · contracts", digits: 2, times: oiTimes
+        }], {
+          label: "Загальний open interest у контрактах, " + openInterestInterval,
+          times: oiTimes, domainTimes: oiTimes
+        });
+    return '<div class="indicator-chart-grid market-chart-grid">' +
         '<section class="indicator-chart-card"><h4>Ціна · ' + interval + "</h4>" +
         chartSvg([{
           values: recent.map(function (candle) { return candle.close; }),
@@ -502,15 +551,15 @@ function renderIndicatorVisualization(pair) {
           values: recent.map(function (candle) { return candle.volume; }),
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
         }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section>" +
-        '<section class="indicator-chart-card"><h4>Open Interest · 5m історія</h4>' +
-        chartSvg([{
-          values: oiHistory.map(function (row) { return row.openInterest; }),
-          color: "#49d4a5", label: "OI", digits: 2,
-          times: oiHistory.map(function (row) { return row.time; })
-        }], {
-          label: "Open Interest з Gate.io contract stats",
-          times: chartTimes, domainTimes: chartTimes
-        }) + "</section></div>";
+        '<section class="indicator-chart-card"><div class="oi-chart-heading"><h4>Загальний OI · ' +
+        escapeHtml(openInterestInterval) + '</h4><label>OI: <select data-oi-visualization-timeframe="' +
+        escapeHtml(pair) + '" aria-label="OI timeframe ' + escapeHtml(pair) + '">' +
+        Object.keys(OPEN_INTEREST_INTERVALS).map(function (item) {
+          return '<option value="' + item + '"' + (item === openInterestInterval ? " selected" : "") +
+            ">" + item + "</option>";
+        }).join("") + "</select></label></div>" + oiWarning + oiContent +
+        '<p class="chart-footnote">Gate надає загальний open_interest у контрактах. lsr_account та lsr_taker — співвідношення, не окремі LONG/SHORT OI. Інтервал формується останнім 5m знімком у кожному завершеному вікні; пропуски не інтерполюються.</p>' +
+        "</section></div>";
     })() : "") +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
     escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
@@ -753,11 +802,13 @@ function render() {
       delete models[pair];
       delete pairErrors[pair];
       visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
+      openInterestSelections = removeVisualizationContract(openInterestSelections, pair);
       delete visualizationData[pair];
       delete visualizationCrosshairTimes[pair];
       openVisualizations.delete(pair);
       savePairs();
       saveVisualizationSelections();
+      saveOpenInterestSelections();
       render();
     });
   });
@@ -779,6 +830,15 @@ function render() {
       delete visualizationCrosshairTimes[pair];
       saveVisualizationSelections();
       ensureVisualizationData(pair, select.value);
+      render();
+    });
+  });
+  cardsNode.querySelectorAll("[data-oi-visualization-timeframe]").forEach(function (select) {
+    select.addEventListener("change", function () {
+      const pair = select.getAttribute("data-oi-visualization-timeframe");
+      openInterestSelections = setOpenInterestInterval(openInterestSelections, pair, select.value);
+      delete visualizationCrosshairTimes[pair];
+      saveOpenInterestSelections();
       render();
     });
   });
