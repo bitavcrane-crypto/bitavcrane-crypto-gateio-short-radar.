@@ -244,10 +244,18 @@ function renderStrategyPanel(model) {
     " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
 }
 
+function currentTickerPrice(model) {
+  const ticker = model && model.data && model.data.ticker;
+  return ticker && ticker.quality === "OK" && Number.isFinite(ticker.last) && ticker.last > 0 ?
+    ticker.last : null;
+}
+
 function chartSvg(seriesList, options) {
+  const currentPrice = options.priceChart && typeof options.currentPrice === "number" &&
+    Number.isFinite(options.currentPrice) && options.currentPrice > 0 ? options.currentPrice : null;
   const allValues = seriesList.reduce(function (values, series) {
     return values.concat(series.values.filter(function (value) { return typeof value === "number" && Number.isFinite(value); }));
-  }, []);
+  }, currentPrice === null ? [] : [currentPrice]);
   if (!allValues.length) return '<p class="chart-empty">Немає даних для графіка</p>';
   if (allValues.length < 2) return '<p class="chart-empty">Недостатньо даних для графіка</p>';
   const min = options.min === undefined ? Math.min.apply(null, allValues) : options.min;
@@ -302,6 +310,15 @@ function chartSvg(seriesList, options) {
         line + '"/>';
     }).join("");
   }).join("");
+  const currentPriceOverlay = currentPrice === null ? "" : (function () {
+    const position = y(currentPrice);
+    const labelY = Math.max(plotTop + 7, Math.min(plotBottom - 2, position));
+    return '<line data-live-price-line x1="' + pad + '" y1="' + position + '" x2="' +
+      (plotEnd - pad) + '" y2="' + position + '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="4 3"/>' +
+      '<text data-live-price-label x="435" y="' + labelY +
+      '" text-anchor="end" fill="#8cecff" font-size="10" font-weight="700">LIVE ' +
+      escapeHtml(formatNumber(currentPrice, 8)) + "</text>";
+  })();
   const seriesData = seriesList.map(function (series) {
     return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits };
   });
@@ -312,7 +329,7 @@ function chartSvg(seriesList, options) {
     '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-role="' +
     (options.priceChart ? "price" : "indicator") + '" data-chart-times=\'' +
     JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
-    backgrounds + guides + markers + paths +
+    backgrounds + guides + markers + paths + currentPriceOverlay +
     '<line data-crosshair-horizontal x1="' + pad + '" y1="' + plotTop + '" x2="' + (plotEnd - pad) +
     '" y2="' + plotTop + '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
     '<line data-crosshair-line x1="' + pad + '" y1="' + plotTop + '" x2="' + pad + '" y2="' + plotBottom +
@@ -377,6 +394,8 @@ function renderIndicatorVisualization(pair) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
   }
   const indicators = view.indicators;
+  const model = models[pair];
+  const currentPrice = currentTickerPrice(model);
   const chartCandles = view.candles.slice(-48);
   const chartTimes = chartCandles.map(function (candle) { return candle.time; });
   const chartStartTime = chartTimes[0];
@@ -443,7 +462,6 @@ function renderIndicatorVisualization(pair) {
         { values: kdj.dValues, color: "#f18c8c", label: "D", digits: 1, times: chartTimes },
         { values: kdj.jValues, color: "#c59bff", label: "J", digits: 1, times: chartTimes }
       ], { guides: [20, 50, 80], label: "KDJ", times: chartTimes, domainTimes: chartTimes });
-  const model = models[pair];
   const shortTermTurn = ema.direction === "bearish" || kdj.cross === "bearish" ||
     rci.possibleReversalDown || kdj.possibleExhaustion ||
     (obv.direction === "bearish" && Number.isFinite(obv.change) && obv.change < 0);
@@ -477,7 +495,7 @@ function renderIndicatorVisualization(pair) {
             label: "Ціна close, " + interval, times: recentTimes, domainTimes: chartTimes,
             markers: recentTimes.length ? [recentTimes.length - 1] : [],
             guides: model.strategy.setup ? [model.strategy.setup.level] : [],
-            priceChart: true
+            priceChart: true, currentPrice: currentPrice
           }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Обсяг · ' + interval + "</h4>" +
         chartSvg([{
