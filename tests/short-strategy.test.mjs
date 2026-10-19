@@ -375,7 +375,9 @@ test("all five numeric short levels are required; caller-provided R/R cannot byp
       const result = evaluateShortStrategy(input);
       assert.equal(result.allowed, false, field + "=" + value);
       assert.equal(result.riskReward, null);
-      assert.ok(result.missing.includes("levels." + field));
+      assert.equal(result.dataReady, true);
+      assert.equal(result.status, "NO TRADE");
+      assert.match(result.blockers.join(" "), /некоректний stop/);
     });
   });
   const input = validInput();
@@ -428,7 +430,8 @@ test("supplied invalidation metadata must identify a recent local high below the
   input.levels.invalidation = 101;
   assert.equal(evaluateShortStrategy(input).allowed, false);
   input.levels.sourceTime = NaN;
-  assert.ok(evaluateShortStrategy(input).missing.includes("levels.sourceTime"));
+  assert.equal(evaluateShortStrategy(input).dataReady, true);
+  assert.match(evaluateShortStrategy(input).blockers.join(" "), /invalidation/);
 });
 
 test("invalid level calculation retains its explicit reason even when target fields are absent", function () {
@@ -440,7 +443,9 @@ test("invalid level calculation retains its explicit reason even when target fie
   const result = evaluateShortStrategy(input);
   assert.equal(result.allowed, false);
   assert.match(result.blockers.join(" "), /Stop too far from recent invalidation/);
-  assert.equal(result.blockers.filter(function (reason) { return reason.includes("DATA UNAVAILABLE"); }).length, 1);
+  assert.equal(result.status, "NO TRADE");
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.blockers.filter(function (reason) { return reason.includes("DATA UNAVAILABLE"); }).length, 0);
 });
 
 test("optional score inputs are distinguished from the canonical execution missing fields", function () {
@@ -460,7 +465,7 @@ test("missing or malformed candle arrays cannot be marked structurally confirmed
     const result = evaluateShortStrategy(input);
     assert.equal(result.allowed, false);
     assert.ok(result.missing.includes("candles." + interval));
-    if (interval !== "4h") assert.equal(result.setupConfirmed, false);
+    assert.equal(result.setupConfirmed, false);
   });
   const input = validInput();
   input.candles["15m"][19].high = NaN;
@@ -489,4 +494,42 @@ test("shared detector tolerates absent, empty and malformed candles", function (
   [undefined, null, [], {}, [null], [candle(100, NaN, 99, 100)]].forEach(function (candles) {
     assert.equal(detectShortSetup(candles), null);
   });
+});
+
+test("normal market without generated levels does not imply missing market data", function () {
+  const input = validInput();
+  input.candles["15m"][19] = candle(100, 100.2, 99.8, 100, 300);
+  input.levels = null;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.setup, null);
+  assert.equal(result.dataReady, true);
+  assert.equal(result.status, "NO TRADE");
+  assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.blockers, []);
+});
+
+test("missing 4h Price × OI or quality keeps a detected setup unconfirmed", function () {
+  ["changes", "oiChanges", "qualities"].forEach(function (field) {
+    const input = validInput();
+    delete input[field]["4h"];
+    const result = evaluateShortStrategy(input);
+    assert.equal(result.setup.type, "support_break");
+    assert.equal(result.setupConfirmed, false);
+    assert.equal(result.setupStatus, "SETUP DETECTED");
+    assert.equal(result.status, "DATA UNAVAILABLE");
+  });
+});
+
+test("recalculated R/R remains finite or unavailable for extreme and precision-limited levels", function () {
+  const input = validInput();
+  input.levels = {
+    entry: 1e-300, stop: 1.0000000000000002e-300,
+    tp1: Number.MIN_VALUE * 3, tp2: Number.MIN_VALUE * 2, tp3: Number.MIN_VALUE,
+    valid: true, riskReward: Infinity
+  };
+  assert.ok(Number.isFinite(evaluateShortStrategy(input).riskReward));
+  input.levels.stop = input.levels.entry + Number.MIN_VALUE;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.riskReward, null);
+  assert.equal(result.allowed, false);
 });

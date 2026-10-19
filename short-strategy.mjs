@@ -323,7 +323,8 @@ export function evaluateShortStrategy(input = {}) {
       return candle.time === levels.sourceTime && candle.high === levels.invalidation;
     }));
   const validLevels = orderedLevels && stopWithinAtr && recentInvalidation && levels.valid !== false;
-  const riskReward = validLevels ? (levels.entry - levels.tp1) / (levels.stop - levels.entry) : null;
+  const calculatedRiskReward = validLevels ? (levels.entry - levels.tp1) / (levels.stop - levels.entry) : null;
+  const riskReward = finite(calculatedRiskReward) ? calculatedRiskReward : null;
   const minimumRiskReward = finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
     input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5;
   const blockers = [];
@@ -350,6 +351,8 @@ export function evaluateShortStrategy(input = {}) {
         !recentInvalidation ? "invalidation/sourceTime не відповідають локальній свічці останніх 9 × 15m або stop" :
           !stopWithinAtr ? "stop distance=" + (levels.stop - levels.entry) + " > 3 ATR=" + (3 * levels.atr) :
             "levels.valid=false")));
+  } else if ((setup || input.levels) && riskReward === null) {
+    blockers.push("Reward/Risk не є скінченним числом");
   } else if (riskReward !== null && riskReward < minimumRiskReward) {
     blockers.push("Reward/Risk=" + riskReward.toFixed(2) + " < порога " + minimumRiskReward.toFixed(2) + " (TP1)");
   }
@@ -362,7 +365,8 @@ export function evaluateShortStrategy(input = {}) {
     bearish15m: bearish15m,
     sellingCandle: sellingCandle
   });
-  const allowed = Boolean(dataReady && setupConfirmed && liquidity.passed && validLevels && blockers.length === 0);
+  const allowed = Boolean(dataReady && setupConfirmed && liquidity.passed && validLevels &&
+    riskReward !== null && blockers.length === 0);
   const missingData = !dataReady;
   return {
     matrix: matrix,
