@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { clearCache, fetchCandles, fetchVisualizationCandles } from "../gate-api.mjs";
+import {
+  clearCache, fetchCandles, fetchOrderBook, fetchVisualizationCandles, normalizeContract,
+  normalizeOrderBook
+} from "../gate-api.mjs";
 
 test("visualization candle requests use the requested USDT contract and interval with 600 bars", async function (context) {
   clearCache();
@@ -56,4 +59,39 @@ test("visualization candle API failures are surfaced to callers", async function
     clearCache();
   });
   await assert.rejects(fetchVisualizationCandles("SOL_USDT", "4h"), /HTTP 503/);
+});
+
+test("order book requests use the futures contract and normalize executable depth", async function (context) {
+  clearCache();
+  const originalFetch = globalThis.fetch;
+  let requested;
+  globalThis.fetch = async function (url) {
+    requested = new URL(url);
+    return {
+      ok: true,
+      json: async function () {
+        return { bids: [{ p: "99.9", s: "100" }], asks: [["100.1", "100"]], update: 1 };
+      }
+    };
+  };
+  context.after(function () {
+    globalThis.fetch = originalFetch;
+    clearCache();
+  });
+  const rawBook = await fetchOrderBook("BTC_USDT");
+  const book = normalizeOrderBook(rawBook, 0.01, 12345);
+  assert.equal(requested.pathname, "/api/v4/futures/usdt/order_book");
+  assert.equal(requested.searchParams.get("contract"), "BTC_USDT");
+  assert.equal(requested.searchParams.get("limit"), "20");
+  assert.equal(book.quality, "OK");
+  assert.ok(book.spreadPercent > 0);
+  assert.equal(book.depthUsd, 99.9);
+  assert.equal(book.slippagePercent, null);
+  assert.equal(book.fetchedAt, 12345);
+  assert.equal(normalizeOrderBook(rawBook, null, 12345).quality, "INCOMPLETE");
+  const deepBook = normalizeOrderBook({
+    bids: [{ p: "99.9", s: "10000" }], asks: [{ p: "100.1", s: "10000" }]
+  }, 0.01, 12345);
+  assert.equal(deepBook.slippagePercent, 0);
+  assert.equal(normalizeContract({ name: "BTC_USDT", status: "trading", quanto_multiplier: "0.01" }).quantoMultiplier, 0.01);
 });

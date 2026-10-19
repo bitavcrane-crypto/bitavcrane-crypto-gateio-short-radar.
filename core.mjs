@@ -1,3 +1,5 @@
+import { evaluateShortStrategy } from "./short-strategy.mjs";
+
 export const QUALITY = Object.freeze({
   OK: "OK",
   NO_DATA: "NO DATA",
@@ -81,28 +83,31 @@ export function relativeChange(current, previous) {
   return (current / previous - 1) * 100;
 }
 
-export function calculateContractMetrics(stats) {
+export function calculateContractMetrics(stats, timeAnchors) {
   const rows = stats && Array.isArray(stats.rows) ? stats.rows : [];
   const quality = stats && stats.quality ? stats.quality : QUALITY.NO_DATA;
   const latest = rows.length ? rows[rows.length - 1] : null;
-  function valueAtOrBefore(ageSeconds, field) {
+  function valueAtOrBefore(target, field) {
     if (!latest) return null;
-    const target = latest.time - ageSeconds;
     let match = null;
     rows.forEach(function (row) {
       if (row.time <= target && finite(row[field]) && (!match || row.time > match.time)) match = row;
     });
     return match;
   }
-  function change(field, ageSeconds) {
-    if (!latest || !finite(latest[field])) return null;
-    const previous = valueAtOrBefore(ageSeconds, field);
-    return previous ? relativeChange(latest[field], previous[field]) : null;
+  function change(field, ageSeconds, anchor) {
+    const endTime = finite(anchor) ? anchor : latest && latest.time;
+    if (!finite(endTime)) return null;
+    const current = valueAtOrBefore(endTime, field);
+    const previous = valueAtOrBefore(endTime - ageSeconds, field);
+    return current && previous ? relativeChange(current[field], previous[field]) : null;
   }
-  function ratioChange(field, ageSeconds) {
-    if (!latest || !finite(latest[field])) return null;
-    const previous = valueAtOrBefore(ageSeconds, field);
-    return previous && previous[field] !== 0 ? relativeChange(latest[field], previous[field]) : null;
+  function ratioChange(field, ageSeconds, anchor) {
+    const endTime = finite(anchor) ? anchor : latest && latest.time;
+    if (!finite(endTime)) return null;
+    const current = valueAtOrBefore(endTime, field);
+    const previous = valueAtOrBefore(endTime - ageSeconds, field);
+    return current && previous && previous[field] !== 0 ? relativeChange(current[field], previous[field]) : null;
   }
   return {
     quality: quality,
@@ -110,16 +115,21 @@ export function calculateContractMetrics(stats) {
     openInterest: latest && finite(latest.openInterest) ? latest.openInterest : null,
     openInterestUsd: latest && finite(latest.openInterestUsd) ? latest.openInterestUsd : null,
     oiChanges: {
-      "15m": change("openInterest", 900),
-      "1h": change("openInterest", 3600),
-      "4h": change("openInterest", 14400)
+      "15m": change("openInterest", 900, timeAnchors && timeAnchors["15m"]),
+      "1h": change("openInterest", 3600, timeAnchors && timeAnchors["1h"]),
+      "4h": change("openInterest", 14400, timeAnchors && timeAnchors["4h"])
     },
     lsrAccount: latest && finite(latest.lsrAccount) ? latest.lsrAccount : null,
     lsrTaker: latest && finite(latest.lsrTaker) ? latest.lsrTaker : null,
-    lsrAccountChange15m: ratioChange("lsrAccount", 900),
+    lsrAccountChange15m: ratioChange("lsrAccount", 900, timeAnchors && timeAnchors["15m"]),
     longLiquidationUsd: latest && finite(latest.longLiquidationUsd) ? latest.longLiquidationUsd : null,
     shortLiquidationUsd: latest && finite(latest.shortLiquidationUsd) ? latest.shortLiquidationUsd : null,
-    markPrice: latest && finite(latest.markPrice) ? latest.markPrice : null
+    markPrice: latest && finite(latest.markPrice) ? latest.markPrice : null,
+    history: rows.filter(function (row) {
+      return finite(row.time) && finite(row.openInterest);
+    }).map(function (row) {
+      return { time: row.time, openInterest: row.openInterest };
+    })
   };
 }
 
@@ -348,7 +358,12 @@ export function buildMarketData(input) {
   };
   const ratio = volumeRatio(normalized["15m"], 20);
   const indicators = calculateIndicators(normalized["15m"]);
-  const stats = calculateContractMetrics(input.stats);
+  const timeAnchors = {};
+  ["15m", "1h", "4h"].forEach(function (interval) {
+    const series = normalized[interval];
+    if (series.length) timeAnchors[interval] = series[series.length - 1].time + INTERVAL_SECONDS[interval];
+  });
+  const stats = calculateContractMetrics(input.stats, timeAnchors);
   const currentOi = stats.openInterest;
   const oiChanges = stats.oiChanges;
   const oiChange15m = finite(oiChanges["15m"]) ? oiChanges["15m"] : null;
@@ -366,33 +381,55 @@ export function buildMarketData(input) {
     ticker: ticker,
     oi: currentOi,
     stats: stats,
+    orderBook: input.orderBook || { quality: QUALITY.NO_DATA },
     oiChanges: oiChanges,
     oiChange15m: oiChange15m,
     fundingIntervalSeconds: fundingInterval,
-    fundingNormalized: fundingNormalized
+    fundingNormalized: fundingNormalized,
+    minimumRiskReward: finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
+      input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5
   };
   const pump = scorePump(changes, ratio);
   const exhaustion = normalized["15m"].length ?
     (pump >= 30 ? scoreExhaustion(data) : 0) : 0;
   const breakdown = normalized["15m"].length ? findBreakdown(normalized["15m"]) : false;
-  const confirmed = breakdown && (
-    (indicators.macd && indicators.macd.histogram < 0) ||
-    (finite(changes["15m"]) && changes["15m"] < 0)
-  );
+  const provisionalLevels = normalized["15m"].length >= 15 ? calculateLevels(normalized["15m"]) : null;
+  const strategy = evaluateShortStrategy({
+    candles: normalized,
+    changes: changes,
+    oiChanges: oiChanges,
+    stats: stats,
+    ticker: ticker,
+    orderBook: data.orderBook,
+    qualities: qualities,
+    volumeRatio: ratio,
+    indicators: indicators,
+    fundingNormalized: fundingNormalized,
+    levels: provisionalLevels,
+    minimumRiskReward: data.minimumRiskReward
+  });
+  const confirmed = strategy.allowed;
   const primaryQuality = qualities["15m"];
   const usableCandles = normalized["15m"].length > 0 && primaryQuality !== QUALITY.STALE &&
     primaryQuality !== QUALITY.SUSPECT && ticker.quality !== QUALITY.CONFLICT;
   const shortReady = usableCandles && primaryQuality === QUALITY.OK && finite(ratio) &&
     normalized["15m"].length >= 35 && indicators.macd !== null && ticker.quality === QUALITY.OK &&
     finite(ticker.last) && finite(currentOi) && finite(oiChange15m) &&
-    qualities["1h"] === QUALITY.OK && finite(changes["1h"]) &&
-    stats.quality === QUALITY.OK;
-  const state = signalState(pump, exhaustion, breakdown, confirmed, usableCandles, shortReady);
-  const levels = state.key === "setup" || state.key === "entry" ?
-    calculateLevels(normalized["15m"]) : null;
-  const shortScore = state.key === "entry" ? Math.min(100, exhaustion + 25) :
-    state.key === "setup" ? Math.min(79, exhaustion + 15) : Math.min(40, exhaustion);
-  const why = explain(data, pump, exhaustion, state);
+    qualities["1h"] === QUALITY.OK && qualities["4h"] === QUALITY.OK &&
+    finite(changes["1h"]) && finite(changes["4h"]) &&
+    finite(oiChanges["1h"]) && finite(oiChanges["4h"]) &&
+    stats.quality === QUALITY.OK && data.orderBook.quality === QUALITY.OK;
+  let state = signalState(pump, exhaustion, breakdown, confirmed, usableCandles, shortReady);
+  if (strategy.allowed) {
+    state = { key: "entry", label: "SHORT ENTRY · " + strategy.setup.type, score: 80 };
+  } else if (strategy.setup && !strategy.dataReady) {
+    state = { key: "incomplete", label: "NO TRADE — DATA UNAVAILABLE", score: 0 };
+  } else if (strategy.setup && shortReady && pump >= 45 && exhaustion >= 55) {
+    state = { key: "setup", label: "WATCH · очікування підтвердження", score: 45 };
+  }
+  const levels = strategy.setup ? provisionalLevels : null;
+  const shortScore = strategy.score;
+  const why = explain(data, pump, exhaustion, state, strategy);
   const confidence = !usableCandles || !finite(ratio) || !finite(ticker.last) ||
     !finite(currentOi) || !finite(oiChange15m) || stats.quality !== QUALITY.OK ? "LOW" :
     shortReady && indicators.rsi !== null && indicators.macd && finite(stats.lsrAccount) &&
@@ -406,6 +443,7 @@ export function buildMarketData(input) {
     breakdown: breakdown,
     confirmed: confirmed,
     levels: levels,
+    strategy: strategy,
     why: why,
     confidence: confidence,
     quality: overallQuality(data)
@@ -418,6 +456,7 @@ function overallQuality(data) {
   if (data.qualities["15m"] === QUALITY.SUSPECT) return QUALITY.SUSPECT;
   if (data.stats.quality === QUALITY.STALE) return QUALITY.STALE;
   if (data.stats.quality === QUALITY.SUSPECT) return QUALITY.SUSPECT;
+  if (!data.orderBook || data.orderBook.quality !== QUALITY.OK) return QUALITY.INCOMPLETE;
   if (!finite(data.ticker.last) || !finite(data.stats.openInterest) ||
       !finite(data.oiChanges["15m"])) return QUALITY.INCOMPLETE;
   if (!finite(data.volumeRatio) || Object.keys(data.changes).some(function (interval) {
@@ -426,12 +465,14 @@ function overallQuality(data) {
   return QUALITY.OK;
 }
 
-function explain(data, pump, exhaustion, state) {
+function explain(data, pump, exhaustion, state, strategy) {
   const parts = [];
   if (state.key === "incomplete") {
     return "Дані недоступні або недостатньої якості для надійної оцінки (15m свічки: " +
       data.qualities["15m"] + ", ticker: " + (data.ticker.quality || QUALITY.NO_DATA) +
-      ", contract stats: " + data.stats.quality + "). SHORT-сигнал не формується.";
+      ", contract stats: " + data.stats.quality + ", order book: " +
+      (data.orderBook.quality || QUALITY.NO_DATA) + "). NO TRADE — DATA UNAVAILABLE. " +
+      (strategy && strategy.blockers.length ? strategy.blockers.join(" · ") : "SHORT-сигнал не формується.");
   }
   const main = data.changes["1h"];
   if (finite(main) && main > 0) parts.push("Ціна " + (main >= 0 ? "+" : "") + main.toFixed(2) + "% за 1h");
@@ -454,8 +495,15 @@ function explain(data, pump, exhaustion, state) {
       data.stats.shortLiquidationUsd > data.stats.longLiquidationUsd * 3) {
     parts.push("переважають ліквідації SHORT за останні 5m — можливий squeeze");
   }
-  if (state.key === "entry") parts.push("закриття пробило локальну підтримку");
-  else if (state.key === "setup") parts.push("є пробій локальної підтримки, очікується підтвердження");
+  if (strategy && strategy.matrix) {
+    parts.push("Price × OI 15m/1h/4h: " + strategy.matrix["15m"].label + " / " +
+      strategy.matrix["1h"].label + " / " + strategy.matrix["4h"].label);
+  }
+  if (strategy && strategy.setup) parts.push("сетап: " + strategy.setup.type + " біля " +
+    strategy.setup.level.toFixed(6));
+  if (state.key === "entry") parts.push("усі обов’язкові блокувальні перевірки пройдено");
+  if (strategy && strategy.blockers.length) parts.push(strategy.blockers.join(" · "));
+  if (state.key === "setup") parts.push("є сетап; SHORT ENTRY ще не дозволено");
   if (finite(data.indicators.rsi) && data.indicators.rsi >= 75) parts.push("RSI перегрітий, але сам по собі не є SHORT-сигналом");
   if (data.stats.quality === QUALITY.OK && finite(data.stats.lsrAccount) && data.stats.lsrAccount >= 2) {
     parts.push("перевага LONG у співвідношенні рахунків (допоміжний фактор)");
@@ -482,8 +530,15 @@ function explain(data, pump, exhaustion, state) {
 export function transitionSignal(current, previous, lastCandleTime) {
   if (!current || !current.data || !current.data.candles15.length) return current;
   const candleTime = current.data.candles15[current.data.candles15.length - 1].time;
-  if (previous && previous.state.key !== "incomplete" && lastCandleTime === candleTime) {
-    return Object.assign({}, previous, { unchangedCandle: true });
+  if (current.strategy && previous && previous.strategy) {
+    const matrixTransitions = {};
+    ["15m", "1h", "4h"].forEach(function (interval) {
+      const oldMatrix = previous.strategy.matrix && previous.strategy.matrix[interval];
+      const newMatrix = current.strategy.matrix && current.strategy.matrix[interval];
+      matrixTransitions[interval] = oldMatrix && newMatrix && oldMatrix.label !== newMatrix.label ?
+        oldMatrix.label + " → " + newMatrix.label : null;
+    });
+    current.strategy = Object.assign({}, current.strategy, { matrixTransitions: matrixTransitions });
   }
   if (previous && (previous.state.key === "setup" || previous.state.key === "entry") &&
       previous.levels && current.data.candles15[current.data.candles15.length - 1].close >= previous.levels.stop) {
@@ -491,8 +546,19 @@ export function transitionSignal(current, previous, lastCandleTime) {
       state: { key: "cancelled", label: "SHORT скасовано", score: 0 },
       shortScore: 0,
       levels: null,
+      strategy: Object.assign({}, current.strategy, {
+        allowed: false,
+        blockers: (current.strategy && current.strategy.blockers || []).concat(
+          "ціна закрилася вище Stop / рівня інвалідації"
+        )
+      }),
       why: "Закриття 15m вище STOP / рівня інвалідації. Попередній SHORT-сценарій скасовано."
     });
+  }
+  if (previous && lastCandleTime === candleTime) {
+    current.candleTime = candleTime;
+    current.unchangedCandle = true;
+    return current;
   }
   if (previous && previous.state.key === "cancelled" && current.state.key === "none") {
     current.state = { key: "cancelled", label: "CANCEL", score: 0 };

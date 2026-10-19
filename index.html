@@ -70,6 +70,11 @@
       <p>KDJ використовує довжину, MA1 та MA2 з панелі вище. Формула: RSV = (close − мінімум low за довжину) / (максимум high − мінімум low) × 100; при нульовому діапазоні RSV = 50. K — проста MA(RSV, MA1), D — проста MA(K, MA2), J = 3K − 2D.</p>
       <button id="reset-visualization" class="subtle-button" type="button">Стандартні параметри графіків</button>
     </details>
+    <section class="risk-settings" aria-label="Параметри ризику">
+      <label for="minimum-risk-reward">Мінімальний Reward/Risk для SHORT ENTRY</label>
+      <input id="minimum-risk-reward" type="number" min="1" max="5" step="0.1" value="1.5">
+      <span>Якщо потенціал нижчий, сигнал блокується.</span>
+    </section>
     <section id="cards" class="cards" aria-live="polite"></section>
     <section id="events" class="events" aria-label="Останні зміни стану">
       <h2>Зміни стану</h2>

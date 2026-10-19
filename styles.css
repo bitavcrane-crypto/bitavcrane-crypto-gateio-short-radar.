@@ -33,6 +33,10 @@ button:disabled { cursor: wait; opacity: .6; }
 .signal-summary { margin: 0 0 14px; padding: 12px 14px; color: #a9bad0; background: #111a27; border: 1px solid #29384a; border-radius: 10px; font-size: 13px; font-weight: 700; }
 .signal-summary.has-signals { color: #ffb0a4; background: #321e24; border-color: #633b3b; }
 .confirmation-settings { margin: 0 0 14px; padding: 12px 14px; color: #a9bad0; background: #111a27; border: 1px solid #29384a; border-radius: 10px; font-size: 12px; }
+.risk-settings { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin: 0 0 14px; padding: 11px 14px; color: #a9bad0; border: 1px solid #29384a; border-radius: 10px; background: #111a27; font-size: 12px; }
+.risk-settings label { color: #d7e2ef; font-weight: 700; }
+.risk-settings input { width: 80px; flex: 0 0 80px; padding: 6px 8px; }
+.risk-settings span { color: #8495aa; }
 .confirmation-settings summary { color: #d7e2ef; cursor: pointer; font-weight: 800; }
 .confirmation-settings > p { margin: 9px 0; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 16px; margin: 12px 0; }
@@ -77,6 +81,17 @@ button:disabled { cursor: wait; opacity: .6; }
 .confirmation-indicator strong { color: #d7e2ef; text-align: right; }
 .confirmation-indicator small { grid-column: 1 / -1; color: #96a8bd; }
 .confirmation-reasons strong { color: #d7e2ef; }
+.strategy-panel { min-width: 0; margin-top: 12px; padding: 10px; border: 1px solid #29384a; border-radius: 9px; background: #0e1621; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.strategy-panel p { margin: 7px 0 0; color: #a9bad0; }
+.strategy-panel strong { color: #d7e2ef; }
+.strategy-heading { display: flex; justify-content: space-between; gap: 8px; color: #d7e2ef; }
+.strategy-heading span { color: #ffb0a4; font-weight: 800; }
+.strategy-matrix { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+.strategy-matrix-row { min-width: 0; display: grid; gap: 3px; padding: 6px; border-radius: 6px; background: #141e2c; }
+.strategy-matrix-row strong { color: #77c8ff; }
+.strategy-matrix-row span { font-weight: 700; }
+.strategy-matrix-row small, .strategy-time { color: #8495aa !important; }
+.strategy-matrix-row .scenario-transition { color: #ffc76f !important; }
 .visualization-toggle { width: 100%; margin-top: 14px; color: #d7e2ef; background: #172232; border: 1px solid #2a3b50; font-size: 12px; }
 .visualization-toggle:hover { color: #fff; background: #202e42; }
 .visualization-panel { margin-top: 10px; min-width: 0; }
@@ -93,6 +108,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .chart-footnote, .chart-empty { color: #8495aa; }
 .visualization-message { padding: 10px; border: 1px solid #29384a; border-radius: 8px; background: #0e1621; }
 .visualization-summary { margin: 8px 0 0; padding: 8px; color: #a9bad0; border-radius: 7px; background: #141e2c; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.market-chart-grid { margin-top: 8px; }
 .empty { grid-column: 1 / -1; padding: 30px; color: #8495aa; border: 1px dashed #2a3a4d; border-radius: 12px; text-align: center; }
 .events { margin-top: 24px; padding: 16px; border: 1px solid #253348; border-radius: 13px; background: #111925; }
 .events h2 { margin: 0 0 10px; font-size: 14px; }
@@ -113,6 +129,7 @@ footer p { margin: 5px 0; }
   .cards { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; }
   .indicator-chart-grid { grid-template-columns: 1fr; }
+  .strategy-matrix { grid-template-columns: 1fr; }
   .visualization-heading { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 400px) {

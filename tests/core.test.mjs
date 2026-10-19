@@ -112,6 +112,16 @@ test("contract stats preserve documented OI units and derive time-based changes"
   assert.equal(calculateContractMetrics(normalizeContractStats([], 1710000000)).quality, "NO DATA");
 });
 
+test("OI changes anchor to the exact closed-candle price interval, not the latest stats timestamp", function () {
+  const rows = [];
+  for (let index = 0; index <= 13; index += 1) {
+    rows.push({ time: index * 300, openInterest: 100 + index, lsrAccount: 1 + index / 100 });
+  }
+  const metrics = calculateContractMetrics({ rows: rows, quality: "OK" }, { "15m": 3600 });
+  assert.equal(metrics.oiChanges["15m"], (112 / 109 - 1) * 100);
+  assert.equal(metrics.lsrAccountChange15m, (1.12 / 1.09 - 1) * 100);
+});
+
 test("contract metadata uses the reported funding interval and active status", function () {
   const active = normalizeContract({ name: "BTC_USDT", status: "trading", funding_interval: 28800 });
   const unknown = normalizeContract({ name: "ALT_USDT", status: "trading" });
@@ -214,19 +224,19 @@ test("watchlist ordering prioritizes confirmed SHORT proximity, then signal scor
   assert.deepEqual(sortPairsBySignal(pairs, models), ["setup", "pump-high", "pump-low", "calm", "missing"]);
 });
 
-test("confirmed SHORT needs an exhausted pump, closed support break and bearish confirmation", function () {
+test("a support break with poor risk/reward is blocked even when the older setup conditions pass", function () {
   const now = 1710000000;
   const rows = [];
   const statsRows = [];
   for (let i = 0; i <= 60; i += 1) {
     statsRows.push({
       time: now - (60 - i) * 300,
-      openInterest: 120 - i * 0.5,
-      openInterestUsd: (120 - i * 0.5) * 1000,
+      openInterest: 120 + i * 0.5,
+      openInterestUsd: (120 + i * 0.5) * 1000,
       lsrAccount: 1 + i / 40,
       lsrTaker: 1.2,
-      longLiquidationUsd: 10,
-      shortLiquidationUsd: 1000
+      longLiquidationUsd: 1000,
+      shortLiquidationUsd: 10
     });
   }
   let close = 100;
@@ -257,25 +267,26 @@ test("confirmed SHORT needs an exhausted pump, closed support break and bearish 
       price *= 1 + rise;
       candles.push({
         t: now - interval * (count - i), o: String(open),
-        h: String(price * 1.004), l: String(open * 0.996), c: String(price), v: "10"
+        h: String(Math.max(open, price) * 1.004), l: String(Math.min(open, price) * 0.996), c: String(price), v: "10"
       });
     }
     return candles;
   }
   const model = buildMarketData({
-    candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, 0.08), "4h": steady(14400, 50, 0.12) },
-    ticker: { quality: "OK", last: Number(rows[59].c), funding: 0.0005 },
+    candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, -0.005), "4h": steady(14400, 50, -0.005) },
+    ticker: { quality: "OK", last: Number(rows[59].c), volume24h: 10000000, funding: 0.0005 },
     stats: { rows: statsRows, quality: "OK" },
+    orderBook: { quality: "OK", spreadPercent: 0.1, depthUsd: 50000 },
     fundingIntervalSeconds: 28800,
     nowSeconds: now
   });
-  assert.equal(model.state.key, "entry");
-  assert.ok(model.exhaustionScore >= 60);
+  assert.notEqual(model.state.key, "entry");
+  assert.match(model.strategy.blockers.join(" "), /Reward\/Risk/);
   assert.ok(model.levels.stop > model.levels.entry);
   assert.ok(model.levels.tp1 < model.levels.entry);
 });
 
-test("signal history does not change on repeated 15m candle and cancellation uses invalidation", function () {
+test("same-candle refresh rechecks blockers immediately and invalidation cancels a setup", function () {
   const current = {
     state: { key: "pump", label: "PUMP ACTIVE" },
     data: { candles15: [{ time: 10, close: 100 }] },
@@ -284,14 +295,37 @@ test("signal history does not change on repeated 15m candle and cancellation use
   };
   const old = { state: { key: "entry", label: "SHORT ENTRY" }, candleTime: 10, levels: { stop: 110 } };
   const same = transitionSignal(current, old, 10);
-  assert.equal(same.state.key, "entry");
+  assert.equal(same.state.key, "pump");
   assert.equal(same.unchangedCandle, true);
   const unavailable = Object.assign({}, old, { state: { key: "incomplete", label: "Дані недоступні" } });
   const recovered = transitionSignal(current, unavailable, 10);
   assert.equal(recovered.state.key, "pump");
-  assert.equal(recovered.unchangedCandle, false);
+  assert.equal(recovered.unchangedCandle, true);
   const next = Object.assign({}, current, { data: { candles15: [{ time: 20, close: 111 }] } });
   assert.equal(transitionSignal(next, old, 10).state.key, "cancelled");
+});
+
+test("Price × OI scenario transitions are surfaced across refreshes", function () {
+  const current = {
+    state: { key: "watch" },
+    data: { candles15: [{ time: 20, close: 100 }] },
+    strategy: { matrix: {
+      "15m": { key: "down_up", label: "PRICE ↓ · OI ↑" },
+      "1h": { key: "down_up", label: "PRICE ↓ · OI ↑" },
+      "4h": { key: "down_down", label: "PRICE ↓ · OI ↓" }
+    } }
+  };
+  const previous = {
+    state: { key: "watch" },
+    strategy: { matrix: {
+      "15m": { key: "down_down", label: "PRICE ↓ · OI ↓" },
+      "1h": { key: "down_up", label: "PRICE ↓ · OI ↑" },
+      "4h": { key: "down_down", label: "PRICE ↓ · OI ↓" }
+    } }
+  };
+  const result = transitionSignal(current, previous, 10);
+  assert.equal(result.strategy.matrixTransitions["15m"], "PRICE ↓ · OI ↓ → PRICE ↓ · OI ↑");
+  assert.equal(result.strategy.matrixTransitions["1h"], null);
 });
 
 test("pair list validates duplicates and add/remove behavior", function () {
