@@ -31,6 +31,22 @@ export function timestampPosition(times, timestamp) {
   return (timestamp - first) / (last - first);
 }
 
+export function positionAtClientX(clientX, bounds, viewBoxWidth, plotStart, plotEnd) {
+  if (!finite(clientX) || !bounds || !finite(bounds.left) || !finite(bounds.width) || bounds.width <= 0 ||
+      !finite(viewBoxWidth) || viewBoxWidth <= 0 || !finite(plotStart) || !finite(plotEnd) || plotEnd <= plotStart) {
+    return null;
+  }
+  const viewX = (clientX - bounds.left) / bounds.width * viewBoxWidth;
+  return (viewX - plotStart) / (plotEnd - plotStart);
+}
+
+export function valueAtPosition(value, minimum, maximum, plotTop, plotBottom) {
+  if (!finite(value) || !finite(minimum) || !finite(maximum) || maximum <= minimum ||
+      !finite(plotTop) || !finite(plotBottom) || plotBottom <= plotTop ||
+      value < minimum || value > maximum) return null;
+  return plotBottom - ((value - minimum) / (maximum - minimum)) * (plotBottom - plotTop);
+}
+
 export function valuesAtTimestamp(seriesList, timestamp) {
   if (!Array.isArray(seriesList) || !finite(timestamp)) return [];
   return seriesList.map(function (series) {
