@@ -36,6 +36,22 @@
     <section id="signal-summary" class="signal-summary" role="status" aria-live="polite">
       Активних SHORT-сигналів немає. Моніторинг триває
     </section>
+    <details class="confirmation-settings">
+      <summary>Додаткове підтвердження SHORT · RCI, OBV, EMA, KDJ</summary>
+      <p>Індикатори оцінюють якість підтвердження окремо і не змінюють базові сигнали радара.</p>
+      <div class="settings-grid">
+        <label><input type="checkbox" data-indicator="rci" checked> RCI · період
+          <input type="number" data-period="rci.period" min="5" max="30" value="9"></label>
+        <label><input type="checkbox" data-indicator="obv" checked> OBV · lookback
+          <input type="number" data-period="obv.lookback" min="3" max="30" value="10"></label>
+        <label><input type="checkbox" data-indicator="ema" checked> EMA · швидка / повільна
+          <input type="number" data-period="ema.fast" min="3" max="30" value="9">
+          <input type="number" data-period="ema.slow" min="5" max="60" value="21"></label>
+        <label><input type="checkbox" data-indicator="kdj" checked> KDJ · період
+          <input type="number" data-period="kdj.period" min="5" max="30" value="9"></label>
+      </div>
+      <button id="reset-confirmation" class="subtle-button" type="button">Відновити стандартні</button>
+    </details>
     <section id="cards" class="cards" aria-live="polite"></section>
     <section id="events" class="events" aria-label="Останні зміни стану">
       <h2>Зміни стану</h2>
