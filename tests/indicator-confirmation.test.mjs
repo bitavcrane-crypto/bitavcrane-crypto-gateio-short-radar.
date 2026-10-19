@@ -35,6 +35,30 @@ function disabledSettings() {
   };
 }
 
+test("optional confirmation cannot confirm stale or discontinuous history despite an entry model", function () {
+  const now = 1710000000;
+  const rows = candles(60, now, "down");
+  const model = { state: { key: "entry" } };
+  const previous = evaluateShortConfirmation(rows, model, DEFAULT_CONFIRMATION_SETTINGS, now);
+  assert.equal(previous.state, "confirmed");
+  const stale = evaluateShortConfirmation(rows, model, DEFAULT_CONFIRMATION_SETTINGS, now + 900, previous);
+  assert.equal(stale.state, "unavailable");
+  const gap = rows.filter(function (_, index) { return index !== 30; });
+  assert.equal(evaluateShortConfirmation(gap, model, DEFAULT_CONFIRMATION_SETTINGS, now).state, "unavailable");
+});
+
+test("same-timestamp corrected history invalidates cached optional indicator results", function () {
+  const now = 1710000000;
+  const rows = candles(60, now, "down");
+  const model = { state: { key: "entry" } };
+  const previous = evaluateShortConfirmation(rows, model, DEFAULT_CONFIRMATION_SETTINGS, now);
+  rows.at(-1).close = rows.at(-1).open * 1.05;
+  rows.at(-1).high = rows.at(-1).close * 1.01;
+  const corrected = evaluateShortConfirmation(rows, model, DEFAULT_CONFIRMATION_SETTINGS, now, previous);
+  assert.notEqual(corrected.historySignature, previous.historySignature);
+  assert.notEqual(corrected.indicators[0], previous.indicators[0]);
+});
+
 test("indicator settings do not alter primary pump or SHORT model output", function () {
   const nowSeconds = 1701000000;
   const rows15 = candles(60, nowSeconds, "up").map(function (candle) {

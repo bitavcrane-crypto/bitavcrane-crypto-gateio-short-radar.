@@ -5,7 +5,8 @@ const cache = new Map();
 const receivedAt = new WeakMap();
 
 function numeric(value) {
-  if (value === null || value === undefined || value === "") return null;
+  if ((typeof value !== "number" && typeof value !== "string") ||
+      (typeof value === "string" && !value.trim())) return null;
   const result = Number(value);
   return Number.isFinite(result) ? result : null;
 }
@@ -14,7 +15,10 @@ async function request(path, cacheMs) {
   const now = Date.now();
   const cached = cache.get(path);
   if (cached && now - cached.time < cacheMs) return cached.value;
-  const response = await fetch(API_ROOT + path, { headers: { Accept: "application/json" } });
+  const response = await fetch(API_ROOT + path, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(15000)
+  });
   if (!response.ok) throw new Error("Gate.io відповів HTTP " + response.status);
   const data = await response.json();
   const time = Date.now();
@@ -94,16 +98,22 @@ export function normalizeTicker(row, contract) {
 export function normalizeContract(row) {
   if (!row || typeof row.name !== "string") return null;
   const interval = numeric(row.funding_interval);
+  const takerFeeRate = numeric(row.taker_fee_rate);
   return {
     name: row.name,
     active: typeof row.status === "string" && row.status.toLowerCase() === "trading",
     fundingIntervalSeconds: interval !== null && interval > 0 ? interval : null,
+    takerFeeRate: takerFeeRate !== null && takerFeeRate >= 0 && takerFeeRate < 1 ? takerFeeRate : null,
     quantoMultiplier: numeric(row.quanto_multiplier) > 0 ? numeric(row.quanto_multiplier) : null
   };
 }
 
 export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
   const fetchedAt = receivedAt.get(book) || fetchedAtMs || Date.now();
+  const generatedAt = numeric(book && book.current);
+  const timestampQuality = generatedAt === null && book && book.current === undefined ? "INCOMPLETE" :
+    generatedAt === null || generatedAt <= 0 || generatedAt > fetchedAt / 1000 + 5 ? "SUSPECT" :
+      fetchedAt / 1000 - generatedAt > 30 ? "STALE" : null;
   let invalidLevels = false;
   const levels = function (items, isBid) {
     if (!Array.isArray(items)) return [];
@@ -158,14 +168,21 @@ export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
   const spreadPercent = (bestAsk / bestBid - 1) * 100;
   const depthUsd = Math.min(bidDepth, askDepth);
   return {
-    quality: invalidLevels || !Number.isFinite(spreadPercent) || !Number.isFinite(depthUsd) ? "SUSPECT" : "OK",
+    quality: invalidLevels || !Number.isFinite(spreadPercent) || !Number.isFinite(depthUsd) ?
+      "SUSPECT" : timestampQuality || "OK",
     bestBid: bestBid,
     bestAsk: bestAsk,
     spreadPercent: Number.isFinite(spreadPercent) ? spreadPercent : null,
     depthUsd: Number.isFinite(depthUsd) ? depthUsd : null,
     slippagePercent: bidSlippage === null || askSlippage === null ? null :
       Math.max(bidSlippage, askSlippage),
-    fetchedAt: fetchedAt
+    fetchedAt: fetchedAt,
+    generatedAt: generatedAt,
+    depthWindowPercent: 0.5,
+    bidDepthUsd: bidDepth,
+    askDepthUsd: askDepth,
+    executionNotionalUsd: 1000,
+    timestampQuality: timestampQuality
   };
 }
 
@@ -193,8 +210,6 @@ export function normalizeContractStats(rows, nowSeconds) {
       }
       return value;
     }
-    const longLiquidationUsd = field("long_liq_usd_new", true);
-    const shortLiquidationUsd = field("short_liq_usd_new", true);
     const stat = {
       time: Math.floor(time),
       openInterest: field("open_interest", true),
@@ -205,10 +220,10 @@ export function normalizeContractStats(rows, nowSeconds) {
       topLsrSize: field("top_lsr_size", true),
       longLiquidationSize: field("long_liq_size", true),
       longLiquidationAmount: field("long_liq_amount", true),
-      longLiquidationUsd: longLiquidationUsd === null ? field("long_liq_usd", true) : longLiquidationUsd,
+      longLiquidationUsd: field("long_liq_usd", true),
       shortLiquidationSize: field("short_liq_size", true),
       shortLiquidationAmount: field("short_liq_amount", true),
-      shortLiquidationUsd: shortLiquidationUsd === null ? field("short_liq_usd", true) : shortLiquidationUsd,
+      shortLiquidationUsd: field("short_liq_usd", true),
       markPrice: field("mark_price", false)
     };
     if (byTime.has(stat.time)) duplicates += 1;

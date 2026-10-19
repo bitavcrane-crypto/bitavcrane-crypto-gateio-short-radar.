@@ -185,13 +185,17 @@ function qualityLabel(bearish, bullish, unavailable, enabled) {
 export function evaluateShortConfirmation(candles, model, settings, nowSeconds, previousConfirmation) {
   try {
     const normalized = normalizeSettings(settings);
-    const closedCandles = Number.isFinite(nowSeconds) && Array.isArray(candles) ?
+    let closedCandles = Number.isFinite(nowSeconds) && Array.isArray(candles) ?
       candles.filter(function (candle) {
         return candle && finite(candle.time) && candle.time + 900 <= nowSeconds &&
           finite(candle.open) && finite(candle.high) && finite(candle.low) && finite(candle.close) &&
           candle.open > 0 && candle.low > 0 && candle.high >= Math.max(candle.open, candle.close, candle.low) &&
           candle.low <= Math.min(candle.open, candle.close);
       }).sort(function (a, b) { return a.time - b.time; }) : [];
+    if (closedCandles.some(function (candle, index) {
+      return index > 0 && candle.time - closedCandles[index - 1].time !== 900;
+    }) || (closedCandles.length &&
+      nowSeconds - (closedCandles[closedCandles.length - 1].time + 900) >= 900)) closedCandles = [];
     const active = normalized.settings;
     const candleTime = closedCandles.length ? closedCandles[closedCandles.length - 1].time : null;
     const priorByName = {};
@@ -203,7 +207,9 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds, 
         };
       });
     }
-    const sameCandle = previousConfirmation && previousConfirmation.closedCandleTime === candleTime;
+    const historySignature = JSON.stringify(closedCandles);
+    const sameCandle = previousConfirmation && previousConfirmation.closedCandleTime === candleTime &&
+      previousConfirmation.historySignature === historySignature;
     const results = [
       indicator("RCI", active.rci.enabled, function (list) { return calculateRci(list, active.rci.period); }, closedCandles,
         active.rci, priorByName.rci, sameCandle),
@@ -265,6 +271,7 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds, 
       conflict: conflict,
       indicators: results,
       settings: active,
+      historySignature: historySignature,
       reasons: reasons,
       closedCandleTime: closedCandles.length ? closedCandles[closedCandles.length - 1].time : null
     };

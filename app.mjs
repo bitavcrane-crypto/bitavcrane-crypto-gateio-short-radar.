@@ -99,7 +99,9 @@ function currentChartSettings() {
 function loadPairs() {
   try {
     const value = JSON.parse(localStorage.getItem(PAIR_KEY) || "null");
-    return Array.isArray(value) ? value : DEFAULT_PAIRS.slice();
+    return Array.isArray(value) ? validatePairList(value, value.filter(function (pair) {
+      return typeof pair === "string";
+    }).map(function (pair) { return pair.trim().toUpperCase(); })) : DEFAULT_PAIRS.slice();
   } catch (error) {
     return DEFAULT_PAIRS.slice();
   }
@@ -208,7 +210,7 @@ function renderStrategyPanel(model) {
   });
   const missing = strategy.missing.length ? strategy.missing.join(" · ") :
     strategy.dataReady ? "Немає" : "якість обов’язкових даних не підтверджена";
-  const blockers = strategy.blockers.length ? strategy.blockers.join(" · ") : "Блокувань немає";
+  const blockers = strategy.blockers.length ? Array.from(new Set(strategy.blockers)).join(" · ") : "Блокувань немає";
   const setup = strategy.setup ? strategy.setupStatus + " · " + strategy.setup.type +
     " · рівень " + formatNumber(strategy.setup.level, 8) : "Формацію не знайдено";
   const updateTime = model.data.orderBook && model.data.orderBook.fetchedAt ?
@@ -220,7 +222,8 @@ function renderStrategyPanel(model) {
     " · Stop " + formatNumber(model.levels.stop, 8) + " · TP1/2/3 " +
     [model.levels.tp1, model.levels.tp2, model.levels.tp3].map(function (value) {
       return formatNumber(value, 8);
-    }).join(" / ") + " · R/R 1 : " + formatNumber(model.levels.riskReward, 2) :
+    }).join(" / ") + " · Gross R/R 1 : " + formatNumber(strategy.riskReward, 2) +
+    " · Net R/R 1 : " + formatNumber(strategy.netRiskReward, 2) + " (" + strategy.riskRewardBasis + ")" :
     "Entry/Stop/цілі не розраховані";
   return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
     escapeHtml(setup) + '</strong><span>' + escapeHtml(strategy.status) + "</span></div>" +
@@ -452,10 +455,7 @@ function renderCard(pair) {
   const oiChangesComplete = ["15m", "1h", "4h"].every(function (intervalKey) {
     return typeof data.oiChanges[intervalKey] === "number" && Number.isFinite(data.oiChanges[intervalKey]);
   });
-  const funding = typeof ticker.funding === "number" && data.fundingIntervalSeconds ?
-    (ticker.funding > 0 ? "+" : "") + formatNumber(ticker.funding * 100, 4) + "% · " +
-      (ticker.funding > 0 ? "LONG платять SHORT" : ticker.funding < 0 ? "SHORT платять LONG" : "нейтральний") :
-    typeof ticker.funding === "number" ? "UNKNOWN (період невідомий)" : "Немає даних";
+  const funding = formatFunding(data);
   const interval = data.fundingIntervalSeconds ?
     formatNumber(data.fundingIntervalSeconds / 3600, 1) + " год" : "невідомо";
   const liquidationQuality = stats.longLiquidationUsd === null && stats.shortLiquidationUsd === null ?
@@ -471,7 +471,8 @@ function renderCard(pair) {
       '<div class="level"><span>TP1</span><strong>' + formatNumber(levelData.tp1, 6) + '</strong></div>' +
       '<div class="level"><span>TP2</span><strong>' + formatNumber(levelData.tp2, 6) + '</strong></div>' +
       '<div class="level"><span>TP3</span><strong>' + formatNumber(levelData.tp3, 6) + '</strong></div>' +
-    '</div><p class="quality-note">R:R до TP1 = 1 : ' + formatNumber(levelData.riskReward, 2) +
+      '</div><p class="quality-note">Gross R:R до TP1 = 1 : ' + formatNumber(levelData.riskReward, 2) +
+        ' · Net R:R = 1 : ' + formatNumber(model.strategy.netRiskReward, 2) +
       ' · *Оцінка за закриттям 15m' + (levelData.valid === false ?
         " · NO TRADE: рівні невалідні" : "") +
       '</p>' : '<p class="quality-note">Entry/Stop/TP з’являться лише для знайденого сетапу з локальною інвалідацією.</p>';
@@ -480,7 +481,7 @@ function renderCard(pair) {
   if (model.state.key === "incomplete" && model.quality === "STALE") {
     qualityNotes.push("Показані останні отримані значення; нові дані недоступні");
   }
-  if (!data.indicators.rsi || !data.indicators.macd) qualityNotes.push("Історії свічок недостатньо для всіх індикаторів");
+  if (!Number.isFinite(data.indicators.rsi) || !data.indicators.macd) qualityNotes.push("Історії свічок недостатньо для всіх індикаторів");
   return '<article class="card"><div class="card-head"><div><h2 class="pair-name">' + escapeHtml(pair) +
     '</h2><p class="price">Остання ціна: ' + formatNumber(ticker.last, 8) +
     (ticker.mark !== null ? " · mark " + formatNumber(ticker.mark, 8) : "") +
@@ -490,8 +491,9 @@ function renderCard(pair) {
     displayState(model) +
     '<div class="scores">' + score("PUMP", model.pumpScore) + score("EXHAUSTION", model.exhaustionScore) +
     score("SHORT", model.shortScore) + '</div><div class="metrics">' +
-    metric("5m / 15m", formatPercent(data.changes["5m"]) + " / " + formatPercent(data.changes["15m"]), data.qualities["15m"]) +
-    metric("1h / 4h", formatPercent(data.changes["1h"]) + " / " + formatPercent(data.changes["4h"]), data.qualities["1h"]) +
+    ["5m", "15m", "1h", "4h"].map(function (timeframe) {
+      return metric("Ціна · " + timeframe, formatPercent(data.changes[timeframe]), data.qualities[timeframe]);
+    }).join("") +
     metric("Обсяг · ratio / 24h", data.volumeRatio === null ? "Немає даних" :
       formatNumber(data.volumeRatio, 2) + "x · $" + formatNumber(ticker.volume24h, 0),
       data.volumeRatio === null || ticker.volume24h === null ? "INCOMPLETE" : "OK") +
@@ -505,12 +507,13 @@ function renderCard(pair) {
       model.strategy.matrix["15m"].label + " / " + model.strategy.matrix["1h"].label + " / " +
         model.strategy.matrix["4h"].label : "Немає даних",
       model.strategy && model.strategy.dataReady ? "OK" : "INCOMPLETE") +
-    metric("Спред / slippage / глибина книги", data.orderBook && data.orderBook.quality === "OK" ?
+    metric("Спред / slippage $1000 / min bid/ask ±0,5%", data.orderBook && data.orderBook.quality === "OK" ?
       formatNumber(data.orderBook.spreadPercent, 3) + "% / " +
         formatPercent(data.orderBook.slippagePercent) + " / $" + formatNumber(data.orderBook.depthUsd, 0) :
-      "NO TRADE · дані недоступні", data.orderBook ? data.orderBook.quality : "NO DATA") +
+      "NO TRADE · дані недоступні", data.orderBook && data.orderBook.quality === "OK" ?
+        model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA") +
     metric("Funding / період", funding + " / " + interval,
-      typeof ticker.funding !== "number" ? "NO DATA" : data.fundingIntervalSeconds ? "OK" : "INCOMPLETE") +
+      ticker.quality !== "OK" ? ticker.quality : !Number.isFinite(data.fundingNormalized) ? "INCOMPLETE" : "OK") +
     metric("Ліквідації · 5m USD", stats.longLiquidationUsd === null || stats.shortLiquidationUsd === null ?
       "Немає достовірних даних" : "LONG $" + formatNumber(stats.longLiquidationUsd, 2) +
       " / SHORT $" + formatNumber(stats.shortLiquidationUsd, 2),
@@ -611,8 +614,20 @@ function refreshOpenVisualizations() {
   });
 }
 
-function notifyChange(pair, oldState, newState) {
+function formatFunding(data) {
+  const funding = data.funding;
+  if (!funding || !Number.isFinite(funding.normalized)) return "UNKNOWN (ставка/період недоступні)";
+  return formatNumber(funding.normalized * 100, 4) + "%/8h · raw " +
+    formatNumber(funding.raw * 100, 4) + "%/" + formatNumber(funding.intervalSeconds / 3600, 1) +
+    "h · " + (funding.raw > 0 ? "LONG платять SHORT" : funding.raw < 0 ? "SHORT платять LONG" : "нейтральний") +
+    " · " + (funding.fetchedAt ? new Date(funding.fetchedAt).toLocaleTimeString("uk-UA") : "час невідомий");
+}
+
+function notifyChange(pair, oldState, newState, model) {
   if (!oldState || oldState === newState || newState === "incomplete" || newState === "none") return;
+  if (newState === "entry" && (!model || !model.confirmed || !model.strategy ||
+      !model.strategy.allowed || !model.strategy.dataReady || model.strategy.blockers.length ||
+      model.strategy.missing.length)) return;
   const message = pair + ": " + oldState.toUpperCase() + " → " + newState.toUpperCase();
   events.unshift(new Date().toLocaleTimeString("uk-UA") + " · " + message);
   events = events.slice(0, MAX_EVENTS);
@@ -635,6 +650,13 @@ function markPairUnavailable(pair, message) {
     dataReady: false,
     missingData: true,
     missing: ["останні дані застаріли: " + message],
+    readiness: {
+      ready: false,
+      missing: ["останні дані застаріли: " + message],
+      timeframes: Object.fromEntries(["15m", "1h", "4h"].map(function (interval) {
+        return [interval, { ready: false, missing: ["candles." + interval + ": оновлення не вдалося"] }];
+      }))
+    },
     status: "DATA UNAVAILABLE",
     setupStatus: models[pair].strategy.setup ? "SETUP DETECTED" : null,
     setupConfirmed: false,
@@ -646,10 +668,14 @@ function markPairUnavailable(pair, message) {
   }) : null;
   models[pair] = Object.assign({}, models[pair], {
     data: Object.assign({}, models[pair].data, {
-      orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" })
+      orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" }),
+      ticker: Object.assign({}, models[pair].data.ticker, { quality: "STALE" }),
+      stats: Object.assign({}, models[pair].data.stats, { quality: "STALE" }),
+      qualities: { "5m": "STALE", "15m": "STALE", "1h": "STALE", "4h": "STALE" }
     }),
     state: { key: "incomplete", label: "Дані недоступні", score: 0 },
     quality: "STALE",
+    confirmed: false,
     pumpScore: null,
     exhaustionScore: null,
     shortScore: null,
@@ -758,9 +784,6 @@ async function scan() {
     const results = await Promise.all([fetchContracts(), fetchTickers()]);
     const normalizedContracts = results[0].map(normalizeContract).filter(Boolean);
     contracts = normalizedContracts.filter(function (item) { return item.active; });
-    const allowed = contracts.map(function (item) { return item.name; });
-    pairs = validatePairList(pairs, allowed);
-    savePairs();
     const contractMap = new Map();
     contracts.forEach(function (item) { contractMap.set(item.name, item); });
     const tickerMap = new Map();
@@ -770,12 +793,19 @@ async function scan() {
     const failures = [];
     await mapLimited(pairs, 3, async function (pair) {
       try {
-        const responses = await Promise.all([
+        if (!contractMap.has(pair)) throw new Error("Контракт відсутній в активному списку Gate.io; пару збережено");
+        const settled = await Promise.allSettled([
           fetchCandles(pair, "5m"), fetchCandles(pair, "15m"),
           fetchCandles(pair, "1h"), fetchCandles(pair, "4h"),
           fetchContractStats(pair),
-          fetchOrderBook(pair).catch(function () { return { quality: "NO DATA" }; })
+          fetchOrderBook(pair)
         ]);
+        const fields = ["candles.5m", "candles.15m", "candles.1h", "candles.4h", "stats", "orderBook"];
+        const responses = settled.map(function (result, index) {
+          if (result.status === "fulfilled") return result.value;
+          failures.push(pair + " " + fields[index] + ": " + result.reason.message);
+          return index === 5 ? { quality: "NO DATA" } : [];
+        });
         const ticker = normalizeTicker(tickerMap.get(pair), pair);
         const nowSeconds = Math.floor(Date.now() / 1000);
         const stats = normalizeContractStats(responses[4], nowSeconds);
@@ -787,12 +817,13 @@ async function scan() {
           stats: stats,
           orderBook: orderBook,
           fundingIntervalSeconds: contractMap.get(pair) ? contractMap.get(pair).fundingIntervalSeconds : null,
+          takerFeeRate: contractMap.get(pair) ? contractMap.get(pair).takerFeeRate : null,
           minimumRiskReward: minimumRiskReward,
           nowSeconds: nowSeconds
         });
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
-        if (!signal.unchangedCandle && prior) notifyChange(pair, prior.state.key, signal.state.key);
+        if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);
         models[pair] = Object.assign({}, signal, {
           indicatorConfirmation: evaluateShortConfirmation(signal.data.candles15, signal, confirmationSettings,
             Math.floor(Date.now() / 1000), prior && prior.indicatorConfirmation)

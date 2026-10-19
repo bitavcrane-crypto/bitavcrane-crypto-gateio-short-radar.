@@ -16,7 +16,8 @@ function finite(value) {
 }
 
 function number(value) {
-  if (value === null || value === undefined || value === "") return null;
+  if ((typeof value !== "number" && typeof value !== "string") ||
+      (typeof value === "string" && !value.trim())) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -65,7 +66,7 @@ export function normalizeCandles(input, interval, nowSeconds) {
   });
   const quality = suspect || duplicates > 0 ? QUALITY.SUSPECT :
     candles.length === 0 ? QUALITY.NO_DATA :
-    nowSeconds - (candles[candles.length - 1].time + seconds) > seconds * 3 ? QUALITY.STALE :
+    nowSeconds - (candles[candles.length - 1].time + seconds) >= seconds ? QUALITY.STALE :
       hasGaps ? QUALITY.INCOMPLETE : QUALITY.OK;
   return { candles: candles, quality: quality, duplicates: duplicates };
 }
@@ -96,7 +97,7 @@ export function calculateContractMetrics(stats, timeAnchors) {
     let match = null;
     rows.forEach(function (row) {
       if (row.time <= target && target - row.time < 300 &&
-          finite(row[field]) && (!match || row.time > match.time)) match = row;
+          (!match || row.time > match.time)) match = row;
     });
     return match;
   }
@@ -105,7 +106,8 @@ export function calculateContractMetrics(stats, timeAnchors) {
     if (!finite(endTime)) return null;
     const current = valueAtOrBefore(endTime, field);
     const previous = valueAtOrBefore(endTime - ageSeconds, field);
-    return current && previous ? relativeChange(current[field], previous[field]) : null;
+    return current && previous && current.time - previous.time === ageSeconds ?
+      relativeChange(current[field], previous[field]) : null;
   }
   function ratioChange(field, ageSeconds, anchor) {
     const endTime = finite(anchor) ? anchor : latest && latest.time;
@@ -116,6 +118,10 @@ export function calculateContractMetrics(stats, timeAnchors) {
   }
   return {
     quality: quality,
+    source: "/futures/usdt/contract_stats",
+    intervalSeconds: 300,
+    oiUnit: "contracts",
+    liquidationUnit: "USDT",
     time: latest ? latest.time : null,
     openInterest: latest && finite(latest.openInterest) ? latest.openInterest : null,
     openInterestUsd: latest && finite(latest.openInterestUsd) ? latest.openInterestUsd : null,
@@ -283,18 +289,19 @@ export function calculateLevels(candles, setup = detectShortSetup(candles)) {
   const localHigh = invalidationCandle.high;
   const stop = localHigh + indicators.atr * 0.2;
   const risk = stop - entry;
-  const supports = localSupport(candles, entry);
+  const supports = Array.from(new Set(localSupport(candles, entry)));
   const tp1 = supports.length ? supports[0] : null;
   const reason = !finite(risk) || localHigh <= entry ? "немає локального рівня інвалідації вище Entry" :
     risk > indicators.atr * 3 ? "Stop надто далекий: " + (risk / indicators.atr).toFixed(2) + " ATR > 3 ATR" :
-      !supports.length ? "немає локальної підтримки нижче Entry для TP1" : null;
+      !supports.length ? "немає локальної підтримки нижче Entry для TP1" :
+        supports.length < 3 ? "немає трьох різних локальних підтримок для TP1/TP2/TP3" : null;
   if (reason) return {
     entry: entry, stop: stop, tp1: tp1, tp2: null, tp3: null,
     riskReward: null, atr: indicators.atr, support: tp1,
     invalidation: localHigh, sourceTime: invalidationCandle.time, valid: false, reason: reason
   };
-  const tp2 = Math.min(entry - indicators.atr * 2, tp1 - indicators.atr);
-  const tp3 = Math.min(entry - indicators.atr * 3, tp2 - indicators.atr);
+  const tp2 = supports[1];
+  const tp3 = supports[2];
   const valid = [entry, stop, tp1, tp2, tp3].every(function (value) {
     return finite(value) && value > 0;
   }) && stop > entry && entry > tp1 && tp1 > tp2 && tp2 > tp3;
@@ -394,6 +401,15 @@ export function buildMarketData(input) {
     input.fundingIntervalSeconds : null;
   const fundingNormalized = finite(ticker.funding) && fundingInterval ?
     ticker.funding * (28800 / fundingInterval) : null;
+  const funding = {
+    source: "/futures/usdt/tickers.funding_rate",
+    unit: "decimal",
+    raw: finite(ticker.funding) ? ticker.funding : null,
+    intervalSeconds: fundingInterval,
+    normalized: finite(fundingNormalized) ? fundingNormalized : null,
+    normalizedIntervalSeconds: 28800,
+    fetchedAt: ticker.fetchedAt
+  };
   const data = {
     candles: normalized,
     candles15: normalized["15m"],
@@ -408,10 +424,12 @@ export function buildMarketData(input) {
     oiChanges: oiChanges,
     oiChange15m: oiChange15m,
     fundingIntervalSeconds: fundingInterval,
-    fundingNormalized: fundingNormalized,
+    fundingNormalized: funding.normalized,
+    funding: funding,
     nowSeconds: input.nowSeconds,
     minimumRiskReward: finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
-      input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5
+      input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5,
+    takerFeeRate: input.takerFeeRate
   };
   const pump = scorePump(changes, ratio);
   const exhaustion = normalized["15m"].length ?
@@ -428,9 +446,10 @@ export function buildMarketData(input) {
     qualities: qualities,
     volumeRatio: ratio,
     indicators: indicators,
-    fundingNormalized: fundingNormalized,
+    fundingNormalized: funding.normalized,
     nowSeconds: input.nowSeconds,
     levels: provisionalLevels,
+    takerFeeRate: input.takerFeeRate,
     minimumRiskReward: data.minimumRiskReward
   });
   const confirmed = strategy.allowed;
@@ -452,7 +471,11 @@ export function buildMarketData(input) {
   } else if (strategy.setup) {
     state = { key: "setup", label: strategy.setupStatus + " · NO TRADE", score: 45 };
   }
-  const levels = strategy.setup ? provisionalLevels : null;
+  const levels = strategy.setup && provisionalLevels && provisionalLevels.valid ?
+    Object.assign({}, provisionalLevels, {
+      riskReward: strategy.riskReward,
+      netRiskReward: strategy.netRiskReward
+    }) : null;
   const shortScore = strategy.score;
   const why = explain(data, pump, exhaustion, state, strategy);
   const confidence = !usableCandles || !finite(ratio) || !finite(ticker.last) ||
@@ -565,10 +588,12 @@ export function transitionSignal(current, previous, lastCandleTime) {
       previous.levels && current.data.candles15[current.data.candles15.length - 1].close >= previous.levels.stop) {
     return Object.assign({}, current, {
       state: { key: "cancelled", label: "SHORT скасовано", score: 0 },
+      confirmed: false,
       shortScore: 0,
       levels: null,
       strategy: Object.assign({}, current.strategy, {
         allowed: false,
+        status: "NO TRADE",
         blockers: (current.strategy && current.strategy.blockers || []).concat(
           "ціна закрилася вище Stop / рівня інвалідації"
         )
@@ -579,6 +604,7 @@ export function transitionSignal(current, previous, lastCandleTime) {
   if (previous && lastCandleTime === candleTime) {
     current.candleTime = candleTime;
     current.unchangedCandle = true;
+    current.stateChanged = previous.state.key !== current.state.key;
     return current;
   }
   if (previous && previous.state.key === "cancelled" && current.state.key === "none") {
@@ -587,6 +613,7 @@ export function transitionSignal(current, previous, lastCandleTime) {
   }
   current.candleTime = candleTime;
   current.unchangedCandle = false;
+  current.stateChanged = Boolean(previous && previous.state.key !== current.state.key);
   return current;
 }
 

@@ -3,6 +3,7 @@ const MIN_BOOK_DEPTH_USD = 10000;
 const MIN_DAILY_VOLUME_USD = 1000000;
 const MAX_SPREAD_PERCENT = 0.2;
 const MAX_SLIPPAGE_PERCENT = 0.15;
+const INTERVAL_SECONDS = { "15m": 900, "1h": 3600, "4h": 14400 };
 
 function finite(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -186,18 +187,25 @@ function requiredData(input) {
     require(input.qualities && input.qualities[interval] === "OK", "qualities." + interval);
     require(finite((input.changes || {})[interval]), "changes." + interval);
     require(finite((input.oiChanges || {})[interval]), "oiChanges." + interval);
+    const seconds = INTERVAL_SECONDS[interval];
     require(Array.isArray(candles[interval]) && candles[interval].length >= 4 &&
-      candles[interval].every(function (candle) {
+      candles[interval].every(function (candle, index, series) {
         return candle && ["open", "high", "low", "close"].every(function (field) {
           return finite(candle[field]) && candle[field] > 0;
         }) && candle.low <= Math.min(candle.open, candle.close) &&
-          candle.high >= Math.max(candle.open, candle.close) && candle.high >= candle.low;
+          candle.high >= Math.max(candle.open, candle.close) && candle.high >= candle.low &&
+          finite(candle.time) && candle.time > 0 &&
+          candle.time + seconds <= input.nowSeconds &&
+          (!index || candle.time - series[index - 1].time === seconds) &&
+          (index !== series.length - 1 || input.nowSeconds - (candle.time + seconds) < seconds);
       }), "candles." + interval);
   });
   const stats = input.stats || {};
   const ticker = input.ticker || {};
   const book = input.orderBook || {};
   require(stats.quality === "OK", "stats.quality");
+  require(finite(stats.time) && input.nowSeconds - stats.time >= 0 &&
+    input.nowSeconds - stats.time <= 600, "stats.time");
   ["shortLiquidationUsd", "longLiquidationUsd", "lsrAccount"].forEach(function (field) {
     require(nonnegative(stats[field]), "stats." + field);
   });
@@ -254,6 +262,11 @@ export function evaluateShortStrategy(input = {}) {
     "4h": classifyPriceOi(changes["4h"], oiChanges["4h"])
   };
   const missing = requiredData(input);
+  ["15m", "1h", "4h"].forEach(function (interval) {
+    if (["qualities.", "candles.", "changes.", "oiChanges."].some(function (prefix) {
+      return missing.includes(prefix + interval);
+    })) matrix[interval] = classifyPriceOi(null, null);
+  });
   const validCandles = function (interval) {
     return missing.includes("candles." + interval) ? [] : candles[interval];
   };
@@ -314,22 +327,33 @@ export function evaluateShortStrategy(input = {}) {
   const orderedLevels = numericLevels && levels.stop > levels.entry &&
     levels.entry > levels.tp1 && levels.tp1 > levels.tp2 && levels.tp2 > levels.tp3;
   const stopWithinAtr = !finite(levels.atr) || levels.stop - levels.entry <= 3 * levels.atr;
-  const hasInvalidation = levels.invalidation !== undefined || levels.sourceTime !== undefined;
-  const recentInvalidation = !hasInvalidation || (finite(levels.invalidation) &&
+  const recentInvalidation = Boolean(setup && finite(levels.invalidation) &&
     finite(levels.sourceTime) && levels.sourceTime > 0 && levels.invalidation > levels.entry &&
     levels.stop > levels.invalidation &&
-    (!setup || (levels.invalidation === setup.invalidation && levels.sourceTime === setup.sourceTime)) &&
+    levels.invalidation === setup.invalidation && levels.sourceTime === setup.sourceTime &&
     candles15.slice(-9).some(function (candle) {
       return candle.time === levels.sourceTime && candle.high === levels.invalidation;
     }));
-  const validLevels = orderedLevels && stopWithinAtr && recentInvalidation && levels.valid !== false;
+  const sameEntry = Boolean(latest15 && levels.entry === latest15.close);
+  const validLevels = orderedLevels && finite(levels.atr) && stopWithinAtr &&
+    recentInvalidation && sameEntry && levels.valid !== false;
   const calculatedRiskReward = validLevels ? (levels.entry - levels.tp1) / (levels.stop - levels.entry) : null;
   const riskReward = finite(calculatedRiskReward) ? calculatedRiskReward : null;
+  const slippage = (input.orderBook || {}).slippagePercent;
+  const costRate = finite(input.takerFeeRate) && input.takerFeeRate >= 0 && input.takerFeeRate < 1 &&
+    finite(slippage) && slippage >= 0 ? input.takerFeeRate + slippage / 100 : null;
+  const netReward = validLevels && costRate !== null ?
+    levels.entry - levels.tp1 - (levels.entry + levels.tp1) * costRate : null;
+  const netRisk = validLevels && costRate !== null ?
+    levels.stop - levels.entry + (levels.entry + levels.stop) * costRate : null;
+  const calculatedNetRiskReward = finite(netReward) && finite(netRisk) && netRisk > 0 ? netReward / netRisk : null;
+  const netRiskReward = finite(calculatedNetRiskReward) ? calculatedNetRiskReward : null;
   const minimumRiskReward = finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
     input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5;
   const blockers = [];
   if (!dataReady) blockers.push("NO TRADE — DATA UNAVAILABLE");
   if (setup && !sellingCandle) blockers.push("немає підтвердженого тиску продажів");
+  if (setup && !setup.confirmed) blockers.push("формація ще не підтверджена закриттям 15m");
   if (setup && finite(input.volumeRatio) && input.volumeRatio >= 0 && input.volumeRatio < 1.5) {
     blockers.push("обсяг продажів volumeRatio=" + input.volumeRatio + " < 1.5× бази");
   }
@@ -349,12 +373,18 @@ export function evaluateShortStrategy(input = {}) {
     blockers.push("некоректний stop/рівні: " + (levels.reason ||
       (!orderedLevels ? "потрібно stop > entry > tp1 > tp2 > tp3 > 0" :
         !recentInvalidation ? "invalidation/sourceTime не відповідають локальній свічці останніх 9 × 15m або stop" :
+          !sameEntry ? "Entry не відповідає останньому закриттю 15m" :
+            !finite(levels.atr) ? "ATR недоступний для перевірки відстані Stop" :
           !stopWithinAtr ? "stop distance=" + (levels.stop - levels.entry) + " > 3 ATR=" + (3 * levels.atr) :
             "levels.valid=false")));
   } else if ((setup || input.levels) && riskReward === null) {
     blockers.push("Reward/Risk не є скінченним числом");
   } else if (riskReward !== null && riskReward < minimumRiskReward) {
     blockers.push("Reward/Risk=" + riskReward.toFixed(2) + " < порога " + minimumRiskReward.toFixed(2) + " (TP1)");
+  }
+  if (costRate !== null && validLevels && (netRiskReward === null || netRiskReward < minimumRiskReward)) {
+    blockers.push("Net Reward/Risk=" + (netRiskReward === null ? "недоступний" : netRiskReward.toFixed(2)) +
+      " < порога " + minimumRiskReward.toFixed(2) + " (комісія taker + slippage на вхід і вихід)");
   }
   const score = scoreShort(input, {
     matrix: matrix,
@@ -368,6 +398,14 @@ export function evaluateShortStrategy(input = {}) {
   const allowed = Boolean(dataReady && setupConfirmed && liquidity.passed && validLevels &&
     riskReward !== null && blockers.length === 0);
   const missingData = !dataReady;
+  const readiness = {
+    missing: missing,
+    timeframes: Object.fromEntries(intervals.map(function (interval) {
+      const fields = missing.filter(function (field) { return field.endsWith("." + interval); });
+      return [interval, { ready: fields.length === 0, missing: fields }];
+    })),
+    ready: dataReady
+  };
   return {
     matrix: matrix,
     setup: setup,
@@ -378,6 +416,7 @@ export function evaluateShortStrategy(input = {}) {
     dataReady: dataReady,
     missingData: missingData,
     missing: missing,
+    readiness: readiness,
     liquidity: liquidity,
     squeezeReasons: squeezeReasons,
     blockers: blockers,
@@ -385,6 +424,8 @@ export function evaluateShortStrategy(input = {}) {
     scoreReasons: score.reasons,
     missingScoreData: Array.from(new Set(missing.concat(score.missing))),
     riskReward: riskReward,
+    netRiskReward: netRiskReward,
+    riskRewardBasis: costRate === null ? "gross; комісія/витрати недоступні" : "net estimate",
     minimumRiskReward: minimumRiskReward,
     flags: {
       bearish15m: bearish15m,
