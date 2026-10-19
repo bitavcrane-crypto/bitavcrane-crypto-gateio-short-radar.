@@ -26,7 +26,12 @@ function loadPairs() {
 }
 
 function savePairs() {
-  localStorage.setItem(PAIR_KEY, JSON.stringify(pairs));
+  try {
+    localStorage.setItem(PAIR_KEY, JSON.stringify(pairs));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Браузер не дозволяє зберегти список у localStorage.";
+  }
 }
 
 function escapeHtml(value) {
@@ -74,17 +79,23 @@ function renderCard(pair) {
   }
   const data = model.data;
   const ticker = data.ticker;
-  const oiChange = data.oiChange15m;
   const stats = data.stats;
+  const openInterestQuality = stats.openInterest === null && stats.openInterestUsd === null ?
+    "NO DATA" : stats.openInterest === null || stats.openInterestUsd === null ? "INCOMPLETE" : stats.quality;
+  const oiChangesComplete = ["15m", "1h", "4h"].every(function (intervalKey) {
+    return typeof data.oiChanges[intervalKey] === "number" && Number.isFinite(data.oiChanges[intervalKey]);
+  });
   const funding = typeof ticker.funding === "number" && data.fundingIntervalSeconds ?
-    formatNumber(ticker.funding * 100, 4) + "%" :
+    (ticker.funding > 0 ? "+" : "") + formatNumber(ticker.funding * 100, 4) + "% · " +
+      (ticker.funding > 0 ? "LONG платять SHORT" : ticker.funding < 0 ? "SHORT платять LONG" : "нейтральний") :
     typeof ticker.funding === "number" ? "UNKNOWN (період невідомий)" : "Немає даних";
   const interval = data.fundingIntervalSeconds ?
     formatNumber(data.fundingIntervalSeconds / 3600, 1) + " год" : "невідомо";
   const liquidationQuality = stats.longLiquidationUsd === null && stats.shortLiquidationUsd === null ?
     "NO DATA" : stats.longLiquidationUsd === null || stats.shortLiquidationUsd === null ? "INCOMPLETE" : stats.quality;
-  const liquidationRatio = stats.longLiquidationUsd > 0 && stats.shortLiquidationUsd !== null ?
-    formatNumber(stats.shortLiquidationUsd / stats.longLiquidationUsd, 2) + "x SHORT/LONG" : "Немає даних";
+  const liquidationRatio = stats.longLiquidationUsd === 0 && stats.shortLiquidationUsd > 0 ?
+    "SHORT>0 · LONG=0" : stats.longLiquidationUsd > 0 && stats.shortLiquidationUsd !== null ?
+      formatNumber(stats.shortLiquidationUsd / stats.longLiquidationUsd, 2) + "x SHORT/LONG" : "Немає даних";
   const levelData = model.levels;
   const levels = levelData ?
     '<div class="levels">' +
@@ -109,23 +120,27 @@ function renderCard(pair) {
     score("SHORT", model.shortScore) + '</div><div class="metrics">' +
     metric("5m / 15m", formatPercent(data.changes["5m"]) + " / " + formatPercent(data.changes["15m"]), data.qualities["15m"]) +
     metric("1h / 4h", formatPercent(data.changes["1h"]) + " / " + formatPercent(data.changes["4h"]), data.qualities["1h"]) +
-    metric("Обсяг · ratio", data.volumeRatio === null ? "Немає даних" : formatNumber(data.volumeRatio, 2) + "x", data.volumeRatio === null ? "INCOMPLETE" : "OK") +
+    metric("Обсяг · ratio / 24h", data.volumeRatio === null ? "Немає даних" :
+      formatNumber(data.volumeRatio, 2) + "x · $" + formatNumber(ticker.volume24h, 0),
+      data.volumeRatio === null || ticker.volume24h === null ? "INCOMPLETE" : "OK") +
     metric("OI · контракти / USD", stats.openInterest === null ? "Немає даних" :
       formatNumber(stats.openInterest, 2) + " / $" + formatNumber(stats.openInterestUsd, 2),
-      stats.openInterest === null ? "NO DATA" : stats.quality) +
+      openInterestQuality) +
     metric("Δ OI · 15m / 1h / 4h", formatPercent(data.oiChanges["15m"]) + " / " +
       formatPercent(data.oiChanges["1h"]) + " / " + formatPercent(data.oiChanges["4h"]),
-      stats.quality === "OK" && data.oiChanges["15m"] !== null ? "OK" : "INCOMPLETE") +
+      stats.quality === "OK" && oiChangesComplete ? "OK" : "INCOMPLETE") +
     metric("Funding / період", funding + " / " + interval,
       typeof ticker.funding !== "number" ? "NO DATA" : data.fundingIntervalSeconds ? "OK" : "INCOMPLETE") +
     metric("Ліквідації · 5m USD", stats.longLiquidationUsd === null || stats.shortLiquidationUsd === null ?
       "Немає достовірних даних" : "LONG $" + formatNumber(stats.longLiquidationUsd, 2) +
       " / SHORT $" + formatNumber(stats.shortLiquidationUsd, 2),
       liquidationQuality) +
-    metric("SHORT/LONG ліквідації", liquidationRatio, liquidationRatio === "Немає даних" ? "INCOMPLETE" : stats.quality) +
+    metric("SHORT/LONG ліквідації", liquidationRatio,
+      liquidationRatio === "Немає даних" ? "INCOMPLETE" : stats.quality) +
     metric("L/S account · taker · Δ 15m", stats.lsrAccount === null ? "Немає даних" :
       formatNumber(stats.lsrAccount, 3) + " / " + formatNumber(stats.lsrTaker, 3) +
-      " · " + formatPercent(stats.lsrAccountChange15m), stats.lsrAccount === null ? "NO DATA" : stats.quality) +
+      " · " + formatPercent(stats.lsrAccountChange15m),
+      stats.lsrAccount === null ? "NO DATA" : stats.lsrTaker === null ? "INCOMPLETE" : stats.quality) +
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
@@ -221,6 +236,8 @@ async function scan() {
           models[pair] = Object.assign({}, models[pair], {
             state: { key: "incomplete", label: "STALE", score: 0 },
             quality: "STALE",
+            pumpScore: 0,
+            exhaustionScore: 0,
             shortScore: 0,
             levels: null,
             why: "Оновлення не вдалося. Попередні дані застаріли й не є підтвердженням для входу."
@@ -244,6 +261,8 @@ async function scan() {
         models[pair] = Object.assign({}, models[pair], {
           state: { key: "incomplete", label: "STALE", score: 0 },
           quality: "STALE",
+          pumpScore: 0,
+          exhaustionScore: 0,
           shortScore: 0,
           levels: null,
           why: "Оновлення не вдалося. Попередні дані застаріли й не є підтвердженням для входу."

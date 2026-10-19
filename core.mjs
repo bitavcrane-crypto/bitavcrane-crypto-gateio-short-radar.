@@ -35,14 +35,14 @@ export function normalizeCandles(input, interval, nowSeconds) {
     const high = number(raw.h);
     const low = number(raw.l);
     const close = number(raw.c);
-    const volume = number(raw.sum);
+    const volume = number(raw.v);
     if (!finite(time) || time < 0 || time > 10000000000 || !finite(open) || !finite(high) ||
         !finite(low) || !finite(close) || open <= 0 || close <= 0 || low <= 0 ||
         high < Math.max(open, close, low) || low > Math.min(open, close)) {
       suspect = true;
       return;
     }
-    if (raw.sum !== null && raw.sum !== undefined && raw.sum !== "" &&
+    if (raw.v !== null && raw.v !== undefined && raw.v !== "" &&
         (volume === null || volume < 0)) suspect = true;
     const candle = {
       time: Math.floor(time),
@@ -286,7 +286,7 @@ function scorePump(changes, ratio) {
   if (finite(hourly) && hourly >= 5) score += 15;
   if (finite(fourHour) && fourHour >= 10) score += 10;
   if (finite(ratio) && ratio >= 1.5) score += Math.min(35, 15 + Math.max(0, ratio - 1.5) * 5);
-  if (finite(main) && main >= 2 && (!finite(ratio) || ratio < 1.2)) score = Math.min(score, 35);
+  if (finite(main) && main >= 2 && (!finite(ratio) || ratio < 1.5)) score = Math.min(score, 35);
   return Math.round(Math.min(100, score));
 }
 
@@ -302,10 +302,10 @@ function scoreExhaustion(data) {
   if (indicators.macd && (indicators.macd.bearishCross || indicators.macd.histogram < 0)) score += 15;
   if (data.candles15.slice(-3).some(function (candle) { return upperWickRatio(candle) >= 0.55; })) score += 12;
   if (indicators.obvDivergence) score += 15;
-  if (finite(data.oiChange15m) && data.oiChange15m < -1) score += 10;
+  if (data.stats.quality === QUALITY.OK && finite(data.oiChange15m) && data.oiChange15m < -1) score += 10;
   if (finite(data.fundingNormalized) && data.fundingNormalized >= 0.0005) score += 5;
-  if (finite(data.stats.lsrAccount) && data.stats.lsrAccount >= 2) score += 5;
-  if (finite(data.stats.longLiquidationUsd) && finite(data.stats.shortLiquidationUsd) &&
+  if (data.stats.quality === QUALITY.OK && finite(data.stats.lsrAccount) && data.stats.lsrAccount >= 2) score += 5;
+  if (data.stats.quality === QUALITY.OK && finite(data.stats.longLiquidationUsd) && finite(data.stats.shortLiquidationUsd) &&
       data.stats.shortLiquidationUsd > data.stats.longLiquidationUsd * 3 &&
       data.stats.shortLiquidationUsd > 0) score += 5;
   return Math.min(100, score);
@@ -321,8 +321,8 @@ function findBreakdown(candles) {
 
 function signalState(pump, exhaustion, breakdown, confirmed, hasData, shortReady) {
   if (!hasData) return { key: "incomplete", label: "INCOMPLETE", score: 0 };
-  if (shortReady && pump >= 30 && exhaustion >= 60 && breakdown && confirmed) return { key: "entry", label: "SHORT ENTRY", score: 80 };
-  if (shortReady && pump >= 30 && exhaustion >= 55 && breakdown) return { key: "setup", label: "SHORT SETUP", score: 65 };
+  if (shortReady && pump >= 45 && exhaustion >= 60 && breakdown && confirmed) return { key: "entry", label: "SHORT ENTRY", score: 80 };
+  if (shortReady && pump >= 45 && exhaustion >= 55 && breakdown) return { key: "setup", label: "SHORT SETUP", score: 65 };
   if (pump >= 55 && exhaustion >= 45) return { key: "exhaustion", label: "EXHAUSTION", score: 45 };
   if (pump >= 65) return { key: "hot", label: "OVERHEATED", score: 25 };
   if (pump >= 45) return { key: "pump", label: "PUMP ACTIVE", score: 10 };
@@ -384,16 +384,19 @@ export function buildMarketData(input) {
     primaryQuality !== QUALITY.SUSPECT && ticker.quality !== QUALITY.CONFLICT;
   const shortReady = usableCandles && primaryQuality === QUALITY.OK && finite(ratio) &&
     normalized["15m"].length >= 35 && indicators.macd !== null && ticker.quality === QUALITY.OK &&
+    finite(ticker.last) && finite(currentOi) && finite(oiChange15m) &&
     qualities["1h"] === QUALITY.OK && finite(changes["1h"]) &&
-    stats.quality === QUALITY.OK && finite(currentOi) && finite(oiChange15m);
+    stats.quality === QUALITY.OK;
   const state = signalState(pump, exhaustion, breakdown, confirmed, usableCandles, shortReady);
   const levels = state.key === "setup" || state.key === "entry" ?
     calculateLevels(normalized["15m"]) : null;
   const shortScore = state.key === "entry" ? Math.min(100, exhaustion + 25) :
     state.key === "setup" ? Math.min(79, exhaustion + 15) : Math.min(40, exhaustion);
   const why = explain(data, pump, exhaustion, state);
-  const confidence = !usableCandles || !finite(ratio) || stats.quality !== QUALITY.OK ? "LOW" :
-    shortReady && indicators.rsi !== null && indicators.macd && finite(stats.lsrAccount) ? "HIGH" : "MEDIUM";
+  const confidence = !usableCandles || !finite(ratio) || !finite(ticker.last) ||
+    !finite(currentOi) || !finite(oiChange15m) || stats.quality !== QUALITY.OK ? "LOW" :
+    shortReady && indicators.rsi !== null && indicators.macd && finite(stats.lsrAccount) &&
+      finite(stats.longLiquidationUsd) && finite(stats.shortLiquidationUsd) ? "HIGH" : "MEDIUM";
   return {
     data: data,
     pumpScore: pump,
@@ -410,10 +413,13 @@ export function buildMarketData(input) {
 }
 
 function overallQuality(data) {
+  if (data.ticker.quality === QUALITY.CONFLICT) return QUALITY.CONFLICT;
   if (data.qualities["15m"] === QUALITY.STALE) return QUALITY.STALE;
   if (data.qualities["15m"] === QUALITY.SUSPECT) return QUALITY.SUSPECT;
   if (data.stats.quality === QUALITY.STALE) return QUALITY.STALE;
   if (data.stats.quality === QUALITY.SUSPECT) return QUALITY.SUSPECT;
+  if (!finite(data.ticker.last) || !finite(data.stats.openInterest) ||
+      !finite(data.oiChanges["15m"])) return QUALITY.INCOMPLETE;
   if (!finite(data.volumeRatio) || Object.keys(data.changes).some(function (interval) {
     return !finite(data.changes[interval]);
   }) || data.stats.quality !== QUALITY.OK) return QUALITY.INCOMPLETE;
@@ -425,13 +431,20 @@ function explain(data, pump, exhaustion, state) {
   const main = data.changes["1h"];
   if (finite(main) && main > 0) parts.push("Ціна " + (main >= 0 ? "+" : "") + main.toFixed(2) + "% за 1h");
   if (finite(data.volumeRatio)) parts.push("обсяг " + data.volumeRatio.toFixed(1) + "x від бази");
-  if (finite(data.oiChange15m)) parts.push("OI " + (data.oiChange15m >= 0 ? "+" : "") + data.oiChange15m.toFixed(2) + "% за 15m");
+  if (data.stats.quality === QUALITY.OK && finite(data.oiChange15m)) {
+    parts.push("OI " + (data.oiChange15m >= 0 ? "+" : "") + data.oiChange15m.toFixed(2) + "% за 15m");
+  }
   else parts.push("зміна OI накопичується");
-  if (finite(main) && main > 0 && finite(data.oiChange15m)) {
+  if (data.stats.quality === QUALITY.OK && finite(main) && main > 0 && finite(data.oiChange15m)) {
     if (data.oiChange15m > 0) parts.push("ціна ↑ + OI ↑ — нарощування позицій");
     else if (data.oiChange15m < 0) parts.push("ціна ↑ + OI ↓ — можливий SHORT squeeze");
   }
-  if (finite(data.stats.shortLiquidationUsd) && data.stats.shortLiquidationUsd > 0 &&
+  if ((finite(main) && main < 0 && finite(data.changes["1h"]) && data.changes["1h"] >= 3) ||
+      (finite(data.changes["15m"]) && finite(data.changes["5m"]) &&
+       data.changes["15m"] > 0 && data.changes["5m"] < data.changes["15m"] * 0.35)) {
+    parts.push("momentum сповільнюється або розвернувся");
+  }
+  if (data.stats.quality === QUALITY.OK && finite(data.stats.shortLiquidationUsd) && data.stats.shortLiquidationUsd > 0 &&
       finite(data.stats.longLiquidationUsd) &&
       data.stats.shortLiquidationUsd > data.stats.longLiquidationUsd * 3) {
     parts.push("переважають ліквідації SHORT за останні 5m — можливий squeeze");
@@ -439,8 +452,17 @@ function explain(data, pump, exhaustion, state) {
   if (state.key === "entry") parts.push("закриття пробило локальну підтримку");
   else if (state.key === "setup") parts.push("є пробій локальної підтримки, очікується підтвердження");
   if (finite(data.indicators.rsi) && data.indicators.rsi >= 75) parts.push("RSI перегрітий, але сам по собі не є SHORT-сигналом");
+  if (data.stats.quality === QUALITY.OK && finite(data.stats.lsrAccount) && data.stats.lsrAccount >= 2) {
+    parts.push("перевага LONG у співвідношенні рахунків (допоміжний фактор)");
+  }
+  if (data.candles15.slice(-3).some(function (candle) { return upperWickRatio(candle) >= 0.55; })) {
+    parts.push("довга верхня тінь показує відмову від вищих цін");
+  }
   if (data.indicators.obvDivergence) parts.push("OBV не підтверджує новий максимум");
-  if (data.indicators.macd && data.indicators.macd.bearishCross) parts.push("bearish MACD crossover");
+  if (data.indicators.macd && data.indicators.macd.histogram < 0) parts.push("MACD histogram bearish");
+  if (finite(data.fundingNormalized) && data.fundingNormalized >= 0.0005) {
+    parts.push("funding підвищений після нормалізації до 8h");
+  }
   if (pump < 25) return "Немає підтвердженого пампу. " + (finite(data.volumeRatio) ? "Ціна й обсяг не показують достатньої аномалії." : "Для оцінки обсягу недостатньо закритих свічок.");
   return parts.length ? parts.join(" · ") : "Є аномальний рух ціни, але підтвердження обсягом/виснаженням обмежене.";
 }
@@ -452,7 +474,7 @@ export function transitionSignal(current, previous, lastCandleTime) {
     return Object.assign({}, previous, { unchangedCandle: true });
   }
   if (previous && (previous.state.key === "setup" || previous.state.key === "entry") &&
-      previous.levels && current.data.candles15[current.data.candles15.length - 1].close > previous.levels.stop) {
+      previous.levels && current.data.candles15[current.data.candles15.length - 1].close >= previous.levels.stop) {
     return Object.assign({}, current, {
       state: { key: "cancelled", label: "CANCEL", score: 0 },
       shortScore: 0,

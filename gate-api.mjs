@@ -85,7 +85,7 @@ export function normalizeContractStats(rows, nowSeconds) {
       return;
     }
     const time = numeric(row.time);
-    if (time === null || time <= 0 || time > 10000000000 || time > nowSeconds + 60) {
+    if (time === null || time <= 0 || time > 10000000000 || time > nowSeconds) {
       suspect = true;
       return;
     }
@@ -98,6 +98,8 @@ export function normalizeContractStats(rows, nowSeconds) {
       }
       return value;
     }
+    const longLiquidationUsd = field("long_liq_usd_new", true);
+    const shortLiquidationUsd = field("short_liq_usd_new", true);
     const stat = {
       time: Math.floor(time),
       openInterest: field("open_interest", true),
@@ -108,10 +110,10 @@ export function normalizeContractStats(rows, nowSeconds) {
       topLsrSize: field("top_lsr_size", true),
       longLiquidationSize: field("long_liq_size", true),
       longLiquidationAmount: field("long_liq_amount", true),
-      longLiquidationUsd: field("long_liq_usd", true),
+      longLiquidationUsd: longLiquidationUsd === null ? field("long_liq_usd", true) : longLiquidationUsd,
       shortLiquidationSize: field("short_liq_size", true),
       shortLiquidationAmount: field("short_liq_amount", true),
-      shortLiquidationUsd: field("short_liq_usd", true),
+      shortLiquidationUsd: shortLiquidationUsd === null ? field("short_liq_usd", true) : shortLiquidationUsd,
       markPrice: field("mark_price", false)
     };
     if (byTime.has(stat.time)) duplicates += 1;

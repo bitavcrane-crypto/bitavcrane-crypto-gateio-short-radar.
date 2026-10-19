@@ -20,7 +20,7 @@ function makeCandles(count, start, interval, trend, volume) {
       h: String(high),
       l: String(low),
       c: String(close),
-      sum: String(volume(i))
+      v: String(volume(i))
     });
   }
   return rows;
@@ -29,12 +29,12 @@ function makeCandles(count, start, interval, trend, volume) {
 test("normalizes candles, removes duplicates and excludes open/future candles", function () {
   const now = 1700000000 + 4 * 300 + 250;
   const input = [
-    { t: 1700000000, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700000300, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700000300, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700000600, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700000900, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700001200, o: "10", h: "11", l: "9", c: "10", sum: "5" }
+    { t: 1700000000, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700000300, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700000300, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700000600, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700000900, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700001200, o: "10", h: "11", l: "9", c: "10", v: "5" }
   ];
   const result = normalizeCandles(input, "5m", now);
   assert.equal(result.candles.length, 4);
@@ -45,11 +45,11 @@ test("normalizes candles, removes duplicates and excludes open/future candles", 
 
 test("missing, stale, malformed timestamps and invalid OHLC remain unavailable", function () {
   assert.equal(normalizeCandles(null, "15m", 1700000000).quality, "NO DATA");
-  const stale = normalizeCandles([{ t: 1699990000, o: "1", h: "2", l: "1", c: "2", sum: "4" }], "15m", 1700000000);
+  const stale = normalizeCandles([{ t: 1699990000, o: "1", h: "2", l: "1", c: "2", v: "4" }], "15m", 1700000000);
   assert.equal(stale.quality, "STALE");
   const invalid = normalizeCandles([
-    { t: 1700000000000, o: "1", h: "2", l: "1", c: "2", sum: "5" },
-    { t: 1699999100, o: "1", h: "0.5", l: "0.8", c: "1.1", sum: "-2" }
+    { t: 1700000000000, o: "1", h: "2", l: "1", c: "2", v: "5" },
+    { t: 1699999100, o: "1", h: "0.5", l: "0.8", c: "1.1", v: "-2" }
   ], "15m", 1700000000);
   assert.equal(invalid.candles.length, 0);
   assert.equal(invalid.quality, "SUSPECT");
@@ -57,8 +57,8 @@ test("missing, stale, malformed timestamps and invalid OHLC remain unavailable",
 
 test("no lookahead uses only fully closed candles", function () {
   const rows = [
-    { t: 1700000000, o: "10", h: "11", l: "9", c: "10", sum: "5" },
-    { t: 1700000900, o: "10", h: "20", l: "9", c: "19", sum: "500" }
+    { t: 1700000000, o: "10", h: "11", l: "9", c: "10", v: "5" },
+    { t: 1700000900, o: "10", h: "20", l: "9", c: "19", v: "500" }
   ];
   const result = normalizeCandles(rows, "15m", 1700000900 + 899);
   assert.equal(result.candles.length, 1);
@@ -85,6 +85,7 @@ test("pump requires price and volume confirmation; missing volume is not zero", 
   });
   assert.equal(withoutVolume.data.volumeRatio, null);
   assert.ok(withoutVolume.pumpScore < withVolume.pumpScore);
+  assert.ok(withoutVolume.pumpScore <= 35);
 });
 
 test("contract stats preserve documented OI units and derive time-based changes", function () {
@@ -134,6 +135,19 @@ test("contract stats flag duplicate, bad timestamp and invalid values", function
   assert.equal(normalizeContractStats([Object.assign({}, valid, { open_interest: "-1" })], 1710000000).quality, "SUSPECT");
 });
 
+test("contract stats prefer Gate's explicit USDT liquidation aggregates", function () {
+  const normalized = normalizeContractStats([{
+    time: 1710000000,
+    open_interest: "10",
+    long_liq_usd: "10",
+    long_liq_usd_new: "25",
+    short_liq_usd: "5",
+    short_liq_usd_new: "0"
+  }], 1710000000);
+  assert.equal(normalized.rows[0].longLiquidationUsd, 25);
+  assert.equal(normalized.rows[0].shortLiquidationUsd, 0);
+});
+
 test("unknown funding interval does not normalize funding", function () {
   const now = 1701000000;
   const rows15 = makeCandles(30, 100, 900, function () { return 0.01; }, function () { return 10; });
@@ -148,7 +162,7 @@ test("unknown funding interval does not normalize funding", function () {
 });
 
 test("normal market and pump without exhaustion do not produce SHORT", function () {
-  const now = 1702000000;
+  const now = 1700054010;
   const flat = makeCandles(60, 100, 900, function () { return 0.01; }, function () { return 10; });
   const model = buildMarketData({
     candles: { "5m": [], "15m": flat, "1h": [], "4h": [] },
@@ -164,10 +178,11 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
   const pumpModel = buildMarketData({
     candles: { "5m": [], "15m": pump, "1h": [], "4h": [] },
     ticker: { quality: "OK", last: 120 },
-    nowSeconds: 1702000000
+    nowSeconds: now
   });
   assert.ok(pumpModel.pumpScore > 0);
   assert.notEqual(pumpModel.state.key, "entry");
+  assert.equal(pumpModel.quality, "INCOMPLETE");
 });
 
 test("confirmed SHORT needs an exhausted pump, closed support break and bearish confirmation", function () {
@@ -202,7 +217,7 @@ test("confirmed SHORT needs an exhausted pump, closed support break and bearish 
     rows.push({
       t: now - 900 * (60 - i), o: String(open),
       h: String(Math.max(open, close, high)), l: String(Math.min(open, close, low)),
-      c: String(close), sum: String(i === 59 ? 10000 : 10)
+      c: String(close), v: String(i === 59 ? 10000 : 10)
     });
   }
   function steady(interval, count, rise) {
@@ -213,14 +228,14 @@ test("confirmed SHORT needs an exhausted pump, closed support break and bearish 
       price *= 1 + rise;
       candles.push({
         t: now - interval * (count - i), o: String(open),
-        h: String(price * 1.004), l: String(open * 0.996), c: String(price), sum: "10"
+        h: String(price * 1.004), l: String(open * 0.996), c: String(price), v: "10"
       });
     }
     return candles;
   }
   const model = buildMarketData({
     candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, 0.08), "4h": steady(14400, 50, 0.12) },
-    ticker: { quality: "OK", funding: 0.0005 },
+    ticker: { quality: "OK", last: Number(rows[59].c), funding: 0.0005 },
     stats: { rows: statsRows, quality: "OK" },
     fundingIntervalSeconds: 28800,
     nowSeconds: now
