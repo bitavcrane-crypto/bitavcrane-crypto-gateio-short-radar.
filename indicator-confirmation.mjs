@@ -207,10 +207,12 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds) 
     if (enabled === 0) state = "disabled";
     else if (conflict) state = "conflict";
     else if (primaryState === "entry" && ready) state = "confirmed";
+    else if (primaryState === "incomplete" || !closedCandles.length || unavailable === enabled) state = "unavailable";
     else if (primaryState === "hot" && bearish === 0) state = "overheated";
     else if (primaryState === "exhaustion") state = "exhaustion";
     else if (bearish > 0 || primaryState === "setup" || primaryState === "entry") state = "waiting";
-    else state = "overheated";
+    else if (primaryState === "none" || primaryState === "cancelled") state = "neutral";
+    else state = "waiting";
 
     const reasons = normalized.issues.slice();
     if (unavailable) reasons.push("Недоступна історія для: " + results.filter(function (result) {
@@ -220,6 +222,7 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds) 
     if (primaryState !== "entry" && enabled > 0) reasons.push("Базовий радар ще не підтвердив SHORT");
     if (primaryState === "entry" && !ready) reasons.push("Бракує узгодженої підтримки індикаторів для підтвердження");
     if (bearish === 0 && enabled > 0 && !unavailable) reasons.push("Немає ознак слабшання, перекупленість не є сигналом на вхід");
+    if (primaryState === "none" || primaryState === "cancelled") reasons.push("Базовий сигнал SHORT відсутній або скасований");
 
     return {
       state: state,
@@ -229,7 +232,9 @@ export function evaluateShortConfirmation(candles, model, settings, nowSeconds) 
         confirmed: "SHORT підтверджено індикаторами",
         overheated: "Перегрів · розворот не підтверджено",
         exhaustion: "Виснаження · очікування підтвердження",
-        waiting: "Очікування підтвердження ціною"
+        waiting: "Очікування підтвердження ціною",
+        neutral: "Базовий SHORT-сигнал відсутній",
+        unavailable: "Підтвердження недоступне"
       }[state],
       quality: qualityLabel(bearish, bullish, unavailable, enabled),
       bearish: bearish,
