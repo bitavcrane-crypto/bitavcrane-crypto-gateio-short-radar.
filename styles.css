@@ -1,0 +1,85 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0b1018;
+  color: #edf2fa;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: radial-gradient(ellipse at top, #172337 0, #0b1018 42rem); }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.app-shell { width: min(1180px, 100%); margin: 0 auto; padding: 28px 20px 36px; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.eyebrow { margin: 0 0 8px; color: #7f9aba; font-size: 11px; font-weight: 800; letter-spacing: .15em; }
+h1 { margin: 0; font-size: clamp(26px, 5vw, 42px); letter-spacing: -.04em; }
+h1 span { color: #42d6aa; }
+.subheading { margin: 8px 0 0; color: #9eafc4; font-size: 14px; }
+.connection { max-width: 260px; padding: 9px 12px; border: 1px solid #29384a; border-radius: 999px; color: #a9bad0; background: #111a27; font-size: 12px; text-align: center; }
+.connection.online { color: #6fe0b3; border-color: #245743; }
+.connection.offline { color: #ff9e91; border-color: #633b3b; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 28px 0 18px; }
+.pair-form { display: flex; gap: 8px; width: min(540px, 100%); }
+input { min-width: 0; flex: 1; padding: 12px 14px; color: #edf2fa; border: 1px solid #2b3a4d; border-radius: 10px; outline: none; background: #111a27; }
+input:focus { border-color: #4c9caa; box-shadow: 0 0 0 3px #4c9caa24; }
+button { border: 0; border-radius: 10px; padding: 11px 14px; color: #071711; background: #49d4a5; font-weight: 800; white-space: nowrap; }
+button:hover { background: #71e6be; }
+button:disabled { cursor: wait; opacity: .6; }
+.toolbar-meta { display: flex; align-items: center; gap: 12px; color: #8495aa; font-size: 12px; }
+.subtle-button { padding: 8px 10px; color: #aabbd0; background: #172232; border: 1px solid #2a3b50; font-size: 11px; }
+.subtle-button:hover { color: #edf2fa; background: #202e42; }
+.notice { margin: 0 0 16px; padding: 12px 14px; color: #ffd694; background: #392d1b; border: 1px solid #644a26; border-radius: 10px; font-size: 13px; }
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.card { min-width: 0; padding: 17px; border: 1px solid #253348; border-radius: 15px; background: linear-gradient(145deg, #141e2c, #101722 75%); box-shadow: 0 12px 30px #0002; }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pair-name { margin: 0; font-size: 19px; letter-spacing: .02em; }
+.price { margin: 5px 0 0; color: #acbdd1; font-size: 13px; overflow-wrap: anywhere; }
+.remove-button { padding: 5px 8px; color: #91a2b8; background: transparent; font-size: 18px; }
+.remove-button:hover { color: #ff968b; background: #34222a; }
+.state { display: inline-block; margin: 14px 0 10px; padding: 6px 9px; border-radius: 999px; color: #aebbd0; background: #222c3a; font-size: 11px; font-weight: 900; letter-spacing: .07em; }
+.state.pump, .state.watch { color: #ffc76f; background: #41331e; }
+.state.hot, .state.exhaustion, .state.setup, .state.entry { color: #ff958c; background: #452629; }
+.state.cancelled { color: #c1c9d4; background: #30343b; }
+.state.incomplete { color: #bdc8d6; background: #30343b; }
+.scores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.score { padding: 9px; border-radius: 9px; background: #0e1621; }
+.score span { display: block; color: #8495aa; font-size: 9px; font-weight: 800; letter-spacing: .08em; }
+.score strong { display: block; margin-top: 5px; font-size: 17px; font-variant-numeric: tabular-nums; }
+.metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
+.metric { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 7px; border-bottom: 1px solid #202b3a; font-size: 12px; }
+.metric span { color: #8596ab; }
+.metric strong { text-align: right; overflow-wrap: anywhere; font-size: 12px; font-variant-numeric: tabular-nums; }
+.quality { margin-left: 3px; color: #71849a; font-size: 9px; font-weight: 500; }
+.levels { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: 14px 0 0; }
+.level { padding: 8px 5px; border-radius: 8px; background: #0e1621; text-align: center; }
+.level span { display: block; color: #8192a8; font-size: 9px; }
+.level strong { display: block; margin-top: 5px; font-size: 11px; overflow-wrap: anywhere; }
+.why { margin: 13px 0 0; padding: 10px 11px; color: #c3cede; border-left: 2px solid #3a9b82; background: #111b26; border-radius: 0 8px 8px 0; font-size: 12px; line-height: 1.55; }
+.quality-note { margin: 10px 0 0; color: #bd9a65; font-size: 11px; }
+.empty { grid-column: 1 / -1; padding: 30px; color: #8495aa; border: 1px dashed #2a3a4d; border-radius: 12px; text-align: center; }
+.events { margin-top: 24px; padding: 16px; border: 1px solid #253348; border-radius: 13px; background: #111925; }
+.events h2 { margin: 0 0 10px; font-size: 14px; }
+.events ul { margin: 0; padding: 0; list-style: none; }
+.events li { padding: 8px 0; color: #b7c4d5; border-top: 1px solid #202b3a; font-size: 12px; }
+.empty-event { color: #7f90a5 !important; }
+footer { margin-top: 20px; color: #73849a; font-size: 11px; line-height: 1.55; }
+footer p { margin: 5px 0; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 760px) {
+  .app-shell { padding: 21px 14px 28px; }
+  .topbar { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .connection { max-width: none; }
+  .toolbar { align-items: stretch; flex-direction: column; margin-top: 20px; }
+  .pair-form { width: 100%; }
+  .toolbar-meta { justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .cards { grid-template-columns: 1fr; }
+}
+@media (max-width: 400px) {
+  .pair-form { flex-wrap: wrap; }
+  .pair-form input { flex-basis: 100%; }
+  .pair-form button { width: 100%; }
+  .card { padding: 13px; }
+  .metrics { gap: 8px; }
+}
