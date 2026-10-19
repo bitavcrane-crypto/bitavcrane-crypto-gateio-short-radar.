@@ -210,6 +210,10 @@ export function normalizeContractStats(rows, nowSeconds) {
       }
       return value;
     }
+    function optionalVisualField(name) {
+      const value = numeric(row[name]);
+      return value !== null && value >= 0 ? value : null;
+    }
     const stat = {
       time: Math.floor(time),
       openInterest: field("open_interest", true),
@@ -218,6 +222,8 @@ export function normalizeContractStats(rows, nowSeconds) {
       lsrAccount: field("lsr_account", true),
       topLsrAccount: field("top_lsr_account", true),
       topLsrSize: field("top_lsr_size", true),
+      topLongOpenInterest: optionalVisualField("top_long_size"),
+      topShortOpenInterest: optionalVisualField("top_short_size"),
       longLiquidationSize: field("long_liq_size", true),
       longLiquidationAmount: field("long_liq_amount", true),
       longLiquidationUsd: field("long_liq_usd", true),

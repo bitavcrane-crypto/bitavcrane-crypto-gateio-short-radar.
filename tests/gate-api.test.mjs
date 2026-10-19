@@ -168,6 +168,35 @@ test("numeric parsing rejects coerced booleans, containers and whitespace withou
   assert.equal(normalizeContractStats([{ time: 1710000000, long_liq_usd: "0" }], 1710000000).rows[0].longLiquidationUsd, 0);
 });
 
+test("Gate top trader long and short OI fields are normalized independently in contracts", function () {
+  const stats = normalizeContractStats([{
+    time: 1710000000,
+    open_interest: "1000",
+    top_long_size: "600",
+    top_short_size: "400",
+    top_lsr_size: "1.5",
+    lsr_account: "2"
+  }], 1710000000);
+  assert.equal(stats.rows[0].topLongOpenInterest, 600);
+  assert.equal(stats.rows[0].topShortOpenInterest, 400);
+  assert.equal(stats.rows[0].openInterest, 1000);
+  assert.equal(stats.rows[0].topLsrSize, 1.5);
+  assert.equal(stats.rows[0].lsrAccount, 2);
+
+  const absent = normalizeContractStats([{ time: 1710000000, open_interest: "1000" }], 1710000000);
+  assert.equal(absent.rows[0].topLongOpenInterest, null);
+  assert.equal(absent.rows[0].topShortOpenInterest, null);
+  const malformedVisualizationFields = normalizeContractStats([{
+    time: 1710000000,
+    open_interest: "1000",
+    top_long_size: "-1",
+    top_short_size: "NaN"
+  }], 1710000000);
+  assert.equal(malformedVisualizationFields.quality, "OK");
+  assert.equal(malformedVisualizationFields.rows[0].topLongOpenInterest, null);
+  assert.equal(malformedVisualizationFields.rows[0].topShortOpenInterest, null);
+});
+
 test("book freshness uses response generation time, not last change time or fresh receipt", function () {
   const now = 1710000000000;
   const book = { bids: [{ p: "99.9", s: "10000" }], asks: [{ p: "100.1", s: "10000" }], update: 1 };
