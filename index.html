@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1019">
+    <title>Gate.io Short Radar</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="app.mjs"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./"><span class="brand-mark">R</span><span>SHORT RADAR<small>GATE.IO · USDT PERPETUAL</small></span></a>
+      <div class="top-actions">
+        <span id="connection" class="connection"><i></i> Підключення…</span>
+        <button id="notification-button" class="button button-quiet" type="button">Увімкнути сповіщення</button>
+        <button id="refresh-button" class="button button-primary" type="button">Оновити скан</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow"><span class="pulse"></span> СКАНУВАННЯ РИНКУ · ОНОВЛЕННЯ ЩОХВИЛИНИ</div>
+          <h1>Знайди памп.<br><em>Дочекайся слабкості.</em></h1>
+          <p class="hero-copy">Скануємо всі доступні USDT perpetual контракти Gate.io. Перегрів — це попередження, а не сигнал на вхід.</p>
+        </div>
+        <div class="hero-stats">
+          <div><strong id="market-count">—</strong><span>КОНТРАКТІВ</span></div>
+          <div><strong id="pump-count">—</strong><span>ПАМПІВ</span></div>
+          <div><strong id="candidate-count">—</strong><span>SHORT-КАНДИДАТІВ</span></div>
+          <div><strong id="updated-at">—</strong><span>ОСТАННЄ ОНОВЛЕННЯ</span></div>
+        </div>
+      </section>
+
+      <section class="notice" aria-label="Попередження про ризик">
+        <span class="notice-icon">!</span>
+        <p><strong>Немає гарантовано безпечного SHORT.</strong> Сигнали — скринінгові евристики на закритих свічках, не фінансова порада. Перевіряйте джерела та рівні самостійно.</p>
+      </section>
+
+      <section class="toolbar">
+        <div class="filters" role="group" aria-label="Фільтри сигналів">
+          <button class="filter active" data-filter="all">Усі <b id="all-count">0</b></button>
+          <button class="filter" data-filter="pump">Пампи <b id="active-count">0</b></button>
+          <button class="filter" data-filter="hot">Перегрів <b id="hot-count">0</b></button>
+          <button class="filter" data-filter="watch">Формування вершини <b id="watch-count">0</b></button>
+          <button class="filter" data-filter="short">SHORT-кандидати <b id="short-count">0</b></button>
+        </div>
+        <div class="toolbar-actions">
+          <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Знайти контракт…" aria-label="Знайти контракт"></label>
+          <button id="add-watchlist" class="button button-quiet" type="button">＋ Додати монету</button>
+          <label class="sort-label">СОРТУВАТИ
+            <select id="sort">
+              <option value="score">Якість SHORT</option>
+              <option value="change">Зростання 4г</option>
+              <option value="volume">Аномальність обсягу</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-live="polite">
+        <div class="table-head">
+          <span>МОНЕТА / СТАТУС</span><span>ЗРОСТАННЯ</span><span>ОБСЯГ 15ХВ</span><span>OI / FUNDING</span><span>ОЗНАКИ</span><span>SHORT / РІВНІ</span>
+        </div>
+        <div id="results" class="results">
+          <div class="empty-state"><span class="loader"></span><strong>Завантажуємо ринок Gate.io</strong><p>Отримуємо тикери та аналізуємо закриті свічки.</p></div>
+        </div>
+      </section>
+      <footer>
+        <span>ДАНІ: GATE.IO PUBLIC API V4</span><span>ТАЙМФРЕЙМ СИГНАЛУ: 15ХВ · ПІДТВЕРДЖЕННЯ: 5ХВ</span><span>ЛОКАЛЬНИЙ СПИСОК СПОСТЕРЕЖЕННЯ</span>
+      </footer>
+    </main>
+
+    <dialog id="watchlist-dialog">
+      <form method="dialog" id="watchlist-form">
+        <button class="dialog-close" value="cancel" aria-label="Закрити">×</button>
+        <div class="eyebrow">ВЛАСНИЙ СПИСОК</div>
+        <h2>Додати контракт</h2>
+        <p>Введіть символ Gate.io, наприклад <code>BTC_USDT</code> або <code>BTC</code>.</p>
+        <input id="contract-input" autocomplete="off" placeholder="TOKEN або TOKEN_USDT" aria-label="Символ контракту" required>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Скасувати</button><button class="button button-primary" id="save-watchlist" value="default">Додати</button></div>
+      </form>
+    </dialog>
+  </body>
+</html>
