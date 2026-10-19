@@ -1,8 +1,10 @@
 import { addPair, buildMarketData, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
 import { fetchCandles, fetchContracts, fetchContractStats, fetchTickers, normalizeContract, normalizeContractStats, normalizeTicker } from "./gate-api.mjs";
+import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
+const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
 const POLL_MS = 60000;
 const MAX_EVENTS = 12;
 const cardsNode = document.getElementById("cards");
@@ -11,6 +13,7 @@ const noticeNode = document.getElementById("notice");
 const connectionNode = document.getElementById("connection");
 const eventList = document.getElementById("event-list");
 const pairInput = document.getElementById("pair-input");
+let confirmationSettings = loadConfirmationSettings();
 let contracts = [];
 let pairs = loadPairs();
 let models = {};
@@ -18,6 +21,15 @@ let pairErrors = {};
 let events = [];
 let busy = false;
 let lastSuccessfulUpdate = null;
+
+function loadConfirmationSettings() {
+  try {
+    const value = JSON.parse(localStorage.getItem(CONFIRMATION_KEY) || "null");
+    return normalizeConfirmationSettings(value).settings;
+  } catch (error) {
+    return normalizeConfirmationSettings(DEFAULT_CONFIRMATION_SETTINGS).settings;
+  }
+}
 
 function loadPairs() {
   try {
@@ -71,6 +83,37 @@ function displayState(model) {
   const label = model ? model.state.label : "NO DATA";
   const key = model ? model.state.key : "incomplete";
   return '<span class="state ' + escapeHtml(key) + '">' + escapeHtml(label) + "</span>";
+}
+
+function confirmationIndicatorValue(result) {
+  if (!result.value) return "Немає даних";
+  if (result.key === "RCI") {
+    return formatNumber(result.value.value, 1) + " · попереднє " + formatNumber(result.value.previous, 1);
+  }
+  if (result.key === "OBV") return "Δ " + formatNumber(result.value.change, 2);
+  if (result.key === "EMA") {
+    return formatNumber(result.value.fast, 6) + " / " + formatNumber(result.value.slow, 6);
+  }
+  return "K " + formatNumber(result.value.k, 1) + " / D " + formatNumber(result.value.d, 1);
+}
+
+function renderConfirmation(model) {
+  const confirmation = model.indicatorConfirmation;
+  if (!confirmation) return "";
+  const indicators = confirmation.indicators.map(function (result) {
+    return '<div class="confirmation-indicator"><span>' + escapeHtml(result.key) + '</span><strong>' +
+      escapeHtml(confirmationIndicatorValue(result)) + '</strong><small>' + escapeHtml(result.detail) + "</small></div>";
+  }).join("");
+  const reasons = confirmation.reasons.length ? confirmation.reasons.join(" · ") : "Немає додаткових причин очікувати";
+  return '<section class="confirmation-panel"><div class="confirmation-heading"><strong>Базовий сигнал радара</strong>' +
+    '<span>' + escapeHtml(model.state.label) + '</span></div><div class="confirmation-heading">' +
+    '<strong>Додаткове підтвердження</strong><span>' + escapeHtml(confirmation.label) + '</span></div>' +
+    '<p class="confirmation-quality">Якість підтвердження: ' + escapeHtml(confirmation.quality) +
+    ' · Ризик сценарію: ' + (confirmation.conflict ? "підвищений через суперечність" :
+      confirmation.unavailable.length ? "оцінити неможливо через відсутні дані" :
+        confirmation.state === "confirmed" ? "залишається" : "не усунутий") + '</p>' +
+    '<div class="confirmation-indicators">' + indicators + '</div><p class="confirmation-reasons"><strong>Чому вхід не підтверджений?</strong> ' +
+    escapeHtml(reasons) + "</p></section>";
 }
 
 function renderCard(pair) {
@@ -153,7 +196,7 @@ function renderCard(pair) {
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
-    '</div>' + levels + '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
+    '</div>' + levels + renderConfirmation(model) + '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
     "</article>";
 }
@@ -210,8 +253,57 @@ function markPairUnavailable(pair, message) {
     shortScore: null,
     confidence: "Немає даних",
     levels: null,
+    indicatorConfirmation: evaluateShortConfirmation([], { state: { key: "incomplete" } },
+      confirmationSettings, Math.floor(Date.now() / 1000)),
     why: "Оновлення не вдалося (" + message + "). Показані останні значення застаріли й не є підтвердженням для входу."
   });
+}
+
+function updateConfirmationSettings(settings) {
+  confirmationSettings = settings;
+  try {
+    localStorage.setItem(CONFIRMATION_KEY, JSON.stringify(settings));
+  } catch (error) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Налаштування підтвердження не вдалося зберегти у localStorage.";
+  }
+  Object.keys(models).forEach(function (pair) {
+    const model = models[pair];
+    if (!model || !model.data) return;
+    models[pair] = Object.assign({}, model, {
+      indicatorConfirmation: evaluateShortConfirmation(model.data.candles15, model, settings,
+        Math.floor(Date.now() / 1000))
+    });
+  });
+  render();
+}
+
+function syncConfirmationControls() {
+  document.querySelectorAll("[data-indicator]").forEach(function (checkbox) {
+    checkbox.checked = confirmationSettings[checkbox.dataset.indicator].enabled;
+  });
+  document.querySelectorAll("[data-period]").forEach(function (input) {
+    const path = input.dataset.period.split(".");
+    input.value = confirmationSettings[path[0]][path[1]];
+  });
+}
+
+function readConfirmationControls() {
+  const settings = {};
+  ["rci", "obv", "ema", "kdj"].forEach(function (name) {
+    settings[name] = { enabled: document.querySelector('[data-indicator="' + name + '"]').checked };
+  });
+  document.querySelectorAll("[data-period]").forEach(function (input) {
+    const path = input.dataset.period.split(".");
+    settings[path[0]][path[1]] = input.value;
+  });
+  const normalized = normalizeConfirmationSettings(settings);
+  syncConfirmationControls();
+  updateConfirmationSettings(normalized.settings);
+  if (normalized.issues.length) {
+    noticeNode.hidden = false;
+    noticeNode.textContent = normalized.issues.join(" · ");
+  }
 }
 
 async function mapLimited(items, limit, worker) {
@@ -266,7 +358,10 @@ async function scan() {
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (!signal.unchangedCandle && prior) notifyChange(pair, prior.state.key, signal.state.key);
-        models[pair] = signal;
+        models[pair] = Object.assign({}, signal, {
+          indicatorConfirmation: evaluateShortConfirmation(signal.data.candles15, signal, confirmationSettings,
+            Math.floor(Date.now() / 1000))
+        });
         delete pairErrors[pair];
       } catch (error) {
         failures.push(pair + ": " + error.message);
@@ -329,6 +424,16 @@ document.getElementById("notify-button").addEventListener("click", async functio
   noticeNode.textContent = permission === "granted" ? "Системні сповіщення увімкнено." : "Дозвіл на системні сповіщення не надано.";
 });
 
+document.querySelectorAll("[data-indicator], [data-period]").forEach(function (control) {
+  control.addEventListener("change", readConfirmationControls);
+});
+document.getElementById("reset-confirmation").addEventListener("click", function () {
+  updateConfirmationSettings(normalizeConfirmationSettings(DEFAULT_CONFIRMATION_SETTINGS).settings);
+  syncConfirmationControls();
+  noticeNode.hidden = true;
+});
+
+syncConfirmationControls();
 render();
 scan();
 window.setInterval(scan, POLL_MS);
