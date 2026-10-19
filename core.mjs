@@ -319,15 +319,15 @@ function findBreakdown(candles) {
   return latest.close < support;
 }
 
-function signalState(pump, exhaustion, breakdown, confirmed, hasData, shortReady) {
-  if (!hasData) return { key: "incomplete", label: "INCOMPLETE", score: 0 };
-  if (shortReady && pump >= 45 && exhaustion >= 60 && breakdown && confirmed) return { key: "entry", label: "SHORT ENTRY", score: 80 };
-  if (shortReady && pump >= 45 && exhaustion >= 55 && breakdown) return { key: "setup", label: "SHORT SETUP", score: 65 };
-  if (pump >= 55 && exhaustion >= 45) return { key: "exhaustion", label: "EXHAUSTION", score: 45 };
-  if (pump >= 65) return { key: "hot", label: "OVERHEATED", score: 25 };
-  if (pump >= 45) return { key: "pump", label: "PUMP ACTIVE", score: 10 };
-  if (pump >= 25) return { key: "watch", label: "PUMP WATCH", score: 0 };
-  return { key: "none", label: "Немає сигналу", score: 0 };
+export function signalState(pump, exhaustion, breakdown, confirmed, hasData, shortReady) {
+  if (!hasData) return { key: "incomplete", label: "Дані недоступні", score: 0 };
+  if (shortReady && pump >= 45 && exhaustion >= 60 && breakdown && confirmed) return { key: "entry", label: "SHORT підтверджено", score: 80 };
+  if (shortReady && pump >= 45 && exhaustion >= 55 && breakdown) return { key: "setup", label: "Пробій · очікування підтвердження", score: 65 };
+  if (pump >= 55 && exhaustion >= 45) return { key: "exhaustion", label: "Виснаження · очікування пробою", score: 45 };
+  if (pump >= 65) return { key: "hot", label: "Перегрів", score: 25 };
+  if (pump >= 45) return { key: "pump", label: "Памп формується", score: 10 };
+  if (pump >= 25) return { key: "watch", label: "Памп формується · ранній рух", score: 0 };
+  return { key: "none", label: "Спокійний ринок", score: 0 };
 }
 
 export function buildMarketData(input) {
@@ -428,6 +428,11 @@ function overallQuality(data) {
 
 function explain(data, pump, exhaustion, state) {
   const parts = [];
+  if (state.key === "incomplete") {
+    return "Дані недоступні або недостатньої якості для надійної оцінки (15m свічки: " +
+      data.qualities["15m"] + ", ticker: " + (data.ticker.quality || QUALITY.NO_DATA) +
+      ", contract stats: " + data.stats.quality + "). SHORT-сигнал не формується.";
+  }
   const main = data.changes["1h"];
   if (finite(main) && main > 0) parts.push("Ціна " + (main >= 0 ? "+" : "") + main.toFixed(2) + "% за 1h");
   if (finite(data.volumeRatio)) parts.push("обсяг " + data.volumeRatio.toFixed(1) + "x від бази");
@@ -476,7 +481,7 @@ export function transitionSignal(current, previous, lastCandleTime) {
   if (previous && (previous.state.key === "setup" || previous.state.key === "entry") &&
       previous.levels && current.data.candles15[current.data.candles15.length - 1].close >= previous.levels.stop) {
     return Object.assign({}, current, {
-      state: { key: "cancelled", label: "CANCEL", score: 0 },
+      state: { key: "cancelled", label: "SHORT скасовано", score: 0 },
       shortScore: 0,
       levels: null,
       why: "Закриття 15m вище STOP / рівня інвалідації. Попередній SHORT-сценарій скасовано."
@@ -489,6 +494,34 @@ export function transitionSignal(current, previous, lastCandleTime) {
   current.candleTime = candleTime;
   current.unchangedCandle = false;
   return current;
+}
+
+const SIGNAL_PRIORITY = Object.freeze({
+  entry: 7,
+  setup: 6,
+  exhaustion: 5,
+  hot: 4,
+  pump: 3,
+  watch: 2,
+  none: 1,
+  cancelled: 0,
+  incomplete: -1
+});
+
+export function sortPairsBySignal(pairs, models) {
+  return pairs.map(function (pair, index) {
+    return { pair: pair, index: index, model: models[pair] };
+  }).sort(function (a, b) {
+    const aPriority = a.model ? SIGNAL_PRIORITY[a.model.state.key] ?? -1 : -1;
+    const bPriority = b.model ? SIGNAL_PRIORITY[b.model.state.key] ?? -1 : -1;
+    if (aPriority !== bPriority) return bPriority - aPriority;
+    for (const scoreName of ["shortScore", "exhaustionScore", "pumpScore"]) {
+      const aScore = finite(a.model && a.model[scoreName]) ? a.model[scoreName] : -1;
+      const bScore = finite(b.model && b.model[scoreName]) ? b.model[scoreName] : -1;
+      if (aScore !== bScore) return bScore - aScore;
+    }
+    return a.index - b.index;
+  }).map(function (item) { return item.pair; });
 }
 
 export function validatePairList(value, allowedContracts) {

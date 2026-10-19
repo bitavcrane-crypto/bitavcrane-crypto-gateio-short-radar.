@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   addPair, buildMarketData, calculateContractMetrics, normalizeCandles, removePair,
-  transitionSignal, validatePairList
+  signalState, sortPairsBySignal, transitionSignal, validatePairList
 } from "../core.mjs";
 import { normalizeContract, normalizeContractStats } from "../gate-api.mjs";
 
@@ -169,6 +169,8 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
     ticker: { quality: "OK", last: 100, funding: null },
     nowSeconds: now
   });
+  assert.equal(model.state.key, "none");
+  assert.equal(model.state.label, "Спокійний ринок");
   assert.equal(model.shortScore, 0);
   assert.notEqual(model.state.key, "entry");
   assert.equal(model.levels, null);
@@ -183,6 +185,30 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
   assert.ok(pumpModel.pumpScore > 0);
   assert.notEqual(pumpModel.state.key, "entry");
   assert.equal(pumpModel.quality, "INCOMPLETE");
+});
+
+test("lifecycle states distinguish calm, pump, overheating, exhaustion, setup, entry and unavailable data", function () {
+  assert.deepEqual(signalState(0, 0, false, false, false, false), {
+    key: "incomplete", label: "Дані недоступні", score: 0
+  });
+  assert.equal(signalState(0, 0, false, false, true, false).label, "Спокійний ринок");
+  assert.equal(signalState(25, 0, false, false, true, false).key, "watch");
+  assert.equal(signalState(45, 0, false, false, true, false).label, "Памп формується");
+  assert.equal(signalState(65, 0, false, false, true, false).label, "Перегрів");
+  assert.equal(signalState(55, 45, false, false, true, false).label, "Виснаження · очікування пробою");
+  assert.equal(signalState(45, 55, true, false, true, true).key, "setup");
+  assert.equal(signalState(45, 60, true, true, true, true).label, "SHORT підтверджено");
+});
+
+test("watchlist ordering prioritizes confirmed SHORT proximity, then signal scores, stably", function () {
+  const pairs = ["calm", "pump-low", "pump-high", "setup", "missing"];
+  const models = {
+    calm: { state: { key: "none" }, shortScore: 0, exhaustionScore: 0, pumpScore: 0 },
+    "pump-low": { state: { key: "pump" }, shortScore: 5, exhaustionScore: 10, pumpScore: 50 },
+    "pump-high": { state: { key: "pump" }, shortScore: 10, exhaustionScore: 20, pumpScore: 60 },
+    setup: { state: { key: "setup" }, shortScore: 70, exhaustionScore: 60, pumpScore: 70 }
+  };
+  assert.deepEqual(sortPairsBySignal(pairs, models), ["setup", "pump-high", "pump-low", "calm", "missing"]);
 });
 
 test("confirmed SHORT needs an exhausted pump, closed support break and bearish confirmation", function () {
