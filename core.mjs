@@ -468,6 +468,13 @@ function explain(data, pump, exhaustion, state) {
   if (finite(data.fundingNormalized) && data.fundingNormalized >= 0.0005) {
     parts.push("funding підвищений після нормалізації до 8h");
   }
+  if (state.key === "watch" || state.key === "pump") {
+    parts.push("SHORT не підтверджено: потрібні ознаки виснаження та закритий пробій підтримки");
+  } else if (state.key === "hot") {
+    parts.push("Перегрів сам по собі не є SHORT-сигналом; чекаємо виснаження та пробою підтримки");
+  } else if (state.key === "exhaustion") {
+    parts.push("Імпульс виснажується, але потрібен закритий пробій підтримки для SHORT");
+  }
   if (pump < 25) return "Немає підтвердженого пампу. " + (finite(data.volumeRatio) ? "Ціна й обсяг не показують достатньої аномалії." : "Для оцінки обсягу недостатньо закритих свічок.");
   return parts.length ? parts.join(" · ") : "Є аномальний рух ціни, але підтвердження обсягом/виснаженням обмежене.";
 }
@@ -475,7 +482,7 @@ function explain(data, pump, exhaustion, state) {
 export function transitionSignal(current, previous, lastCandleTime) {
   if (!current || !current.data || !current.data.candles15.length) return current;
   const candleTime = current.data.candles15[current.data.candles15.length - 1].time;
-  if (previous && lastCandleTime === candleTime) {
+  if (previous && previous.state.key !== "incomplete" && lastCandleTime === candleTime) {
     return Object.assign({}, previous, { unchangedCandle: true });
   }
   if (previous && (previous.state.key === "setup" || previous.state.key === "entry") &&

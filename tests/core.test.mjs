@@ -184,6 +184,9 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
   });
   assert.ok(pumpModel.pumpScore > 0);
   assert.notEqual(pumpModel.state.key, "entry");
+  if (pumpModel.state.key === "watch" || pumpModel.state.key === "pump") {
+    assert.match(pumpModel.why, /SHORT не підтверджено/);
+  }
   assert.equal(pumpModel.quality, "INCOMPLETE");
 });
 
@@ -283,6 +286,10 @@ test("signal history does not change on repeated 15m candle and cancellation use
   const same = transitionSignal(current, old, 10);
   assert.equal(same.state.key, "entry");
   assert.equal(same.unchangedCandle, true);
+  const unavailable = Object.assign({}, old, { state: { key: "incomplete", label: "Дані недоступні" } });
+  const recovered = transitionSignal(current, unavailable, 10);
+  assert.equal(recovered.state.key, "pump");
+  assert.equal(recovered.unchangedCandle, false);
   const next = Object.assign({}, current, { data: { candles15: [{ time: 20, close: 111 }] } });
   assert.equal(transitionSignal(next, old, 10).state.key, "cancelled");
 });
