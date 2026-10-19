@@ -2,7 +2,7 @@ import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySign
 import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
-import { createCrosshairController, formatCrosshairTime } from "./chart-crosshair.mjs";
+import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
 import { getVisualizationInterval, normalizeVisualizationSelections, removeVisualizationContract, setVisualizationInterval, VISUALIZATION_INTERVALS } from "./visualization-state.mjs";
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
@@ -256,13 +256,15 @@ function chartSvg(seriesList, options) {
   const height = 104;
   const pad = 5;
   const plotEnd = 330;
+  const plotTop = pad;
+  const plotBottom = height - pad;
   const x = function (time, times) {
     const first = options.domainTimes[0];
     const last = options.domainTimes[options.domainTimes.length - 1];
     const fraction = first === last ? 0.5 : (time - first) / (last - first);
     return pad + fraction * (plotEnd - pad * 2);
   };
-  const y = function (value) { return height - pad - ((value - low) / (high - low)) * (height - pad * 2); };
+  const y = function (value) { return plotBottom - ((value - low) / (high - low)) * (plotBottom - plotTop); };
   const backgrounds = options.zones ? options.zones.map(function (zone) {
     return '<rect x="0" y="' + y(zone.to) + '" width="' + plotEnd + '" height="' +
       Math.max(0, y(zone.from) - y(zone.to)) + '" fill="' + zone.color + '"/>';
@@ -305,11 +307,16 @@ function chartSvg(seriesList, options) {
       '" y="' + (12 + index * 12) + '" text-anchor="end">' + escapeHtml(series.label || "Значення") + ": —</text>";
   }).join("");
   return '<svg class="indicator-chart-svg" viewBox="0 0 440 104" role="img" aria-label="' +
-    escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-times=\'' +
+    escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-viewbox-width="' + width +
+    '" data-chart-plot-start="' + pad + '" data-chart-plot-end="' + (plotEnd - pad) +
+    '" data-chart-plot-top="' + plotTop + '" data-chart-plot-bottom="' + plotBottom +
+    '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-times=\'' +
     JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
     backgrounds + guides + markers + paths +
-    '<line data-crosshair-line x1="0" y1="0" x2="0" y2="' + height +
-    '" stroke="#ffffff" stroke-width="1" stroke-dasharray="2 2" visibility="hidden" pointer-events="none"/>' +
+    '<line data-crosshair-horizontal x1="' + pad + '" y1="' + plotTop + '" x2="' + (plotEnd - pad) +
+    '" y2="' + plotTop + '" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
+    '<line data-crosshair-line x1="' + pad + '" y1="' + plotTop + '" x2="' + pad + '" y2="' + plotBottom +
+    '" stroke="#ffffff" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
     valueLabels + "</svg>";
 }
 
@@ -515,13 +522,28 @@ function bindSynchronizedCrosshair(panel, pair) {
     updates.forEach(function (update, chartIndex) {
       const svg = chartElements[chartIndex];
       const line = svg.querySelector("[data-crosshair-line]");
+      const horizontal = svg.querySelector("[data-crosshair-horizontal]");
       if (update.position === null) {
         line.setAttribute("visibility", "hidden");
+        horizontal.setAttribute("visibility", "hidden");
       } else {
-        const x = 5 + update.position * 320;
+        const plotStart = Number(svg.getAttribute("data-chart-plot-start"));
+        const plotEnd = Number(svg.getAttribute("data-chart-plot-end"));
+        const plotTop = Number(svg.getAttribute("data-chart-plot-top"));
+        const plotBottom = Number(svg.getAttribute("data-chart-plot-bottom"));
+        const x = plotStart + update.position * (plotEnd - plotStart);
         line.setAttribute("x1", String(x));
         line.setAttribute("x2", String(x));
         line.setAttribute("visibility", "visible");
+        const y = valueAtPosition(update.values[0], Number(svg.getAttribute("data-chart-min")),
+          Number(svg.getAttribute("data-chart-max")), plotTop, plotBottom);
+        if (y === null) {
+          horizontal.setAttribute("visibility", "hidden");
+        } else {
+          horizontal.setAttribute("y1", String(y));
+          horizontal.setAttribute("y2", String(y));
+          horizontal.setAttribute("visibility", "visible");
+        }
       }
       svg.querySelectorAll("[data-crosshair-value]").forEach(function (label, seriesIndex) {
         const series = charts[chartIndex].series[seriesIndex];
@@ -568,9 +590,10 @@ function bindSynchronizedCrosshair(panel, pair) {
     const chartIndex = chartElements.indexOf(svg);
     if (chartIndex < 0) return;
     const bounds = svg.getBoundingClientRect();
-    if (!bounds.width) return;
-    const viewX = (event.clientX - bounds.left) / bounds.width * 440;
-    controller.selectAt(chartIndex, (viewX - 5) / 320);
+    const position = positionAtClientX(event.clientX, bounds,
+      Number(svg.getAttribute("data-chart-viewbox-width")),
+      Number(svg.getAttribute("data-chart-plot-start")), Number(svg.getAttribute("data-chart-plot-end")));
+    if (position !== null) controller.selectAt(chartIndex, position);
   }
 }
 
