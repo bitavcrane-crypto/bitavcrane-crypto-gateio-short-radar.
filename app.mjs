@@ -427,7 +427,6 @@ function renderIndicatorVisualization(pair) {
   const currentPrice = currentTickerPrice(model);
   const chartCandles = view.candles.slice(-48);
   const chartTimes = chartCandles.map(function (candle) { return candle.time; });
-  const chartStartTime = chartTimes[0];
   const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
   const rciColors = ["#77c8ff", "#49d4a5", "#f18c8c"];
@@ -511,30 +510,36 @@ function renderIndicatorVisualization(pair) {
     (model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
-    const oiView = buildOpenInterestSeries(model.data.stats.history, openInterestInterval,
-      Math.floor(Date.now() / 1000));
-    const oiHistory = oiView.rows;
-    const oiTimes = oiHistory.map(function (row) { return row.time; });
-    const oiValues = oiHistory.map(function (row) { return row.openInterest; });
-    const oiPoints = oiValues.filter(function (value) { return Number.isFinite(value); }).length;
-    const oiLastTime = oiHistory.filter(function (row) { return Number.isFinite(row.openInterest); })
-      .map(function (row) { return row.time; }).pop();
-    const oiQuality = model.data.stats.quality;
-    const oiWarning = oiQuality === "OK" ? "" :
-      '<p class="chart-empty">Стан джерела OI: ' + escapeHtml(oiQuality) +
-        (Number.isFinite(oiLastTime) ? " · остання точка: " +
-          escapeHtml(new Date(oiLastTime * 1000).toLocaleString("uk-UA")) : "") + ".</p>";
-    const oiContent = oiView.status !== "ok" ?
-      '<p class="chart-empty">Немає завершених історичних точок OI для цього інтервалу.</p>' :
-        (oiPoints < 2 ? '<p class="chart-empty">Для лінії потрібно щонайменше дві завершені точки; доступно: ' +
-          oiPoints + ".</p>" : "") +
-        chartSvg([{
-          values: oiValues, color: "#49d4a5", label: "TOTAL OI · contracts", digits: 2, times: oiTimes
-        }], {
-          label: "Загальний open interest у контрактах, " + openInterestInterval,
-          times: oiTimes, domainTimes: oiTimes
-        });
-    return '<div class="indicator-chart-grid market-chart-grid">' +
+      const oiView = buildOpenInterestSeries(model.data.stats.history, openInterestInterval,
+        Math.floor(Date.now() / 1000));
+      const oiHistory = oiView.rows;
+      const oiTimes = oiHistory.map(function (row) { return row.time; });
+      const oiLongValues = oiHistory.map(function (row) { return row.topLongOpenInterest; });
+      const oiShortValues = oiHistory.map(function (row) { return row.topShortOpenInterest; });
+      const oiLongPoints = oiLongValues.filter(function (value) { return Number.isFinite(value); }).length;
+      const oiShortPoints = oiShortValues.filter(function (value) { return Number.isFinite(value); }).length;
+      const oiLastTime = oiHistory.filter(function (row) {
+        return Number.isFinite(row.topLongOpenInterest) || Number.isFinite(row.topShortOpenInterest);
+      }).map(function (row) { return row.time; }).pop();
+      const oiQuality = model.data.stats.quality;
+      const oiWarning = oiQuality === "OK" ? "" :
+        '<p class="chart-empty">Стан джерела OI: ' + escapeHtml(oiQuality) +
+          (Number.isFinite(oiLastTime) ? " · остання точка: " +
+            escapeHtml(new Date(oiLastTime * 1000).toLocaleString("uk-UA")) : "") + ".</p>";
+      const oiContent = oiView.status !== "ok" ?
+        '<p class="chart-empty">Немає завершених точок top long/short OI у відповіді Gate.</p>' :
+          (oiLongPoints < 2 || oiShortPoints < 2 ?
+            '<p class="chart-empty">Для кожної лінії потрібно дві завершені точки; LONG: ' +
+              oiLongPoints + " · SHORT: " + oiShortPoints + ".</p>" : "") +
+          chartSvg([{
+            values: oiLongValues, color: "#49d4a5", label: "TOP LONG OI · contracts", digits: 2, times: oiTimes
+          }, {
+            values: oiShortValues, color: "#f18c8c", label: "TOP SHORT OI · contracts", digits: 2, times: oiTimes
+          }], {
+            label: "Top trader long/short open interest у контрактах, " + openInterestInterval,
+            times: oiTimes, domainTimes: oiTimes
+          });
+      return '<div class="indicator-chart-grid market-chart-grid">' +
         '<section class="indicator-chart-card"><h4>Ціна · ' + interval + "</h4>" +
         chartSvg([{
           values: recent.map(function (candle) { return candle.close; }),
@@ -551,14 +556,16 @@ function renderIndicatorVisualization(pair) {
           values: recent.map(function (candle) { return candle.volume; }),
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
         }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section>" +
-        '<section class="indicator-chart-card"><div class="oi-chart-heading"><h4>Загальний OI · ' +
+        '<section class="indicator-chart-card"><div class="oi-chart-heading"><h4>Top trader OI · ' +
         escapeHtml(openInterestInterval) + '</h4><label>OI: <select data-oi-visualization-timeframe="' +
         escapeHtml(pair) + '" aria-label="OI timeframe ' + escapeHtml(pair) + '">' +
         Object.keys(OPEN_INTEREST_INTERVALS).map(function (item) {
           return '<option value="' + item + '"' + (item === openInterestInterval ? " selected" : "") +
             ">" + item + "</option>";
-        }).join("") + "</select></label></div>" + oiWarning + oiContent +
-        '<p class="chart-footnote">Gate надає загальний open_interest у контрактах. lsr_account та lsr_taker — співвідношення, не окремі LONG/SHORT OI. Інтервал формується останнім 5m знімком у кожному завершеному вікні; пропуски не інтерполюються.</p>' +
+        }).join("") + "</select></label></div>" +
+        '<p class="oi-legend"><span class="oi-long">TOP LONG OI · contracts</span>' +
+          '<span class="oi-short">TOP SHORT OI · contracts</span></p>' + oiWarning + oiContent +
+        '<p class="chart-footnote">За Gate, top_long_size і top_short_size — OI топтрейдерів у контрактах, а не всього ринку. Загальний open_interest та lsr_account/lsr_taker не підміняють ці серії. Інтервал формується останнім 5m знімком у кожному завершеному вікні; пропуски не інтерполюються.</p>' +
         "</section></div>";
     })() : "") +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +

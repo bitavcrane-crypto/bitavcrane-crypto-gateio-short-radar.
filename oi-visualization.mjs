@@ -19,12 +19,19 @@ export function buildOpenInterestSeries(rows, interval, nowSeconds) {
   let duplicates = 0;
   rows.forEach(function (row) {
     const time = numeric(row && row.time);
-    const openInterest = numeric(row && row.openInterest);
+    const topLongOpenInterest = numeric(row && row.topLongOpenInterest);
+    const topShortOpenInterest = numeric(row && row.topShortOpenInterest);
     if (time === null || time <= 0 || time > 10000000000 || time > nowSeconds ||
-        openInterest === null || openInterest < 0) return;
+        (topLongOpenInterest === null && topShortOpenInterest === null) ||
+        (topLongOpenInterest !== null && topLongOpenInterest < 0) ||
+        (topShortOpenInterest !== null && topShortOpenInterest < 0)) return;
     const timestamp = Math.floor(time);
     if (samples.has(timestamp)) duplicates += 1;
-    samples.set(timestamp, { time: timestamp, openInterest: openInterest });
+    samples.set(timestamp, {
+      time: timestamp,
+      topLongOpenInterest: topLongOpenInterest,
+      topShortOpenInterest: topShortOpenInterest
+    });
   });
 
   const buckets = new Map();
@@ -49,12 +56,14 @@ export function buildOpenInterestSeries(rows, interval, nowSeconds) {
     if (ordered.length === expectedSamples) {
       series.push(ordered[ordered.length - 1]);
     } else {
-      series.push({ time: bucketStart, openInterest: null });
+      series.push({ time: bucketStart, topLongOpenInterest: null, topShortOpenInterest: null });
     }
   }
 
   return {
-    status: series.some(function (point) { return Number.isFinite(point.openInterest); }) ? "ok" : "unavailable",
+    status: series.some(function (point) {
+      return Number.isFinite(point.topLongOpenInterest) || Number.isFinite(point.topShortOpenInterest);
+    }) ? "ok" : "unavailable",
     intervalSeconds: intervalSeconds,
     rows: series,
     duplicates: duplicates
