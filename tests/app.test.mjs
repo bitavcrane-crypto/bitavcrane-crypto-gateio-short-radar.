@@ -129,7 +129,7 @@ test("OI chart timeframe is independent and top-trader LONG/SHORT OI uses its do
   assert.match(source, /gate-short-radar-oi-visualization-state/);
   assert.match(source, /data-oi-visualization-timeframe=/);
   assert.match(source, /setOpenInterestInterval\(openInterestSelections, pair, select\.value\)/);
-  assert.match(source, /buildOpenInterestSeries\(model\.data\.stats\.history, openInterestInterval/);
+  assert.match(source, /buildOpenInterestSeries\(model\.data\.oiVisualizationHistory \|\| \[\], openInterestInterval/);
   assert.match(source, /label: "TOP LONG OI · contracts"/);
   assert.match(source, /label: "TOP SHORT OI · contracts"/);
   assert.match(source, /top_long_size і top_short_size — OI топтрейдерів/);
@@ -222,7 +222,10 @@ test("partial API failures preserve other timeframes and missing contracts never
         return { t: now - (4 - index) * seconds, o: "100", h: "101", l: "99", c: "100", v: "10" };
       });
     },
-    fetchContractStats: async function () { return []; },
+    fetchContractStats: async function () { return [{
+      time: Math.floor(now / 300) * 300 - 300,
+      open_interest: "1000", top_long_size: "600", top_short_size: "400"
+    }]; },
     fetchOrderBook: async function () { throw new Error("HTTP 503"); },
     mapLimited: async function (items, _, worker) { await Promise.all(items.map(worker)); },
     normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker, buildMarketData, transitionSignal,
@@ -235,6 +238,8 @@ test("partial API failures preserve other timeframes and missing contracts never
   await scan();
   assert.equal(models.Q_USDT.data.qualities["15m"], "OK");
   assert.equal(models.Q_USDT.data.qualities["1h"], "OK");
+  assert.equal(models.Q_USDT.data.oiVisualizationHistory[0].topLongOpenInterest, 600);
+  assert.equal(models.Q_USDT.data.oiVisualizationHistory[0].topShortOpenInterest, 400);
   assert.equal(models.Q_USDT.strategy.readiness.timeframes["4h"].ready, false);
   assert.ok(models.Q_USDT.strategy.missing.includes("candles.4h"));
   assert.equal(models.Q_USDT.strategy.allowed, false);

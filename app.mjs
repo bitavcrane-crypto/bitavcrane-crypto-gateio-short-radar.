@@ -510,7 +510,7 @@ function renderIndicatorVisualization(pair) {
     (model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
-      const oiView = buildOpenInterestSeries(model.data.stats.history, openInterestInterval,
+      const oiView = buildOpenInterestSeries(model.data.oiVisualizationHistory || [], openInterestInterval,
         Math.floor(Date.now() / 1000));
       const oiHistory = oiView.rows;
       const oiTimes = oiHistory.map(function (row) { return row.time; });
@@ -1089,6 +1089,7 @@ async function scan() {
           minimumRiskReward: minimumRiskReward,
           nowSeconds: nowSeconds
         });
+        model.data.oiVisualizationHistory = stats.rows;
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);
