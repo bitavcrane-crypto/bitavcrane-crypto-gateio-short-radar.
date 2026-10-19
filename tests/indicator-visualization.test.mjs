@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createCrosshairController, formatCrosshairTime, valuesAtTimestamp } from "../chart-crosshair.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS } from "../indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
 import { DEFAULT_VISUALIZATION_INTERVAL, getVisualizationInterval, setVisualizationInterval } from "../visualization-state.mjs";
@@ -180,4 +181,38 @@ test("per-contract selections default to 15m and parameter changes do not switch
   selections = setVisualizationInterval(selections, "BTC_USDT", "5m");
   assert.equal(getVisualizationInterval(selections, "BTC_USDT"), "5m");
   assert.equal(getVisualizationInterval(selections, "ETH_USDT"), "15m");
+});
+
+test("crosshair selection from every chart synchronizes panels by timestamp and reports exact historical series values", function () {
+  const times = [1700000000, 1700000900, 1700001800];
+  const charts = [
+    { times: times, series: [{ times: times, values: [10, 11, 12] }, { times: times, values: [null, 2, 3] }] },
+    { times: times, series: [{ times: times, values: [40, 50, 60] }] },
+    { times: times, series: [{ times: [times[0], times[2]], values: [7, 9] }] }
+  ];
+  let selected;
+  const controller = createCrosshairController(charts, function (timestamp, updates) {
+    selected = { timestamp: timestamp, updates: updates };
+  });
+
+  assert.equal(controller.selectAt(0, 0.5), times[1]);
+  assert.equal(selected.timestamp, times[1]);
+  assert.deepEqual(selected.updates.map(function (update) { return update.position; }), [0.5, 0.5, 0.5]);
+  assert.deepEqual(selected.updates.map(function (update) { return update.values; }), [[11, 2], [50], [null]]);
+
+  assert.equal(controller.selectAt(1, 1), times[2]);
+  assert.equal(selected.timestamp, times[2]);
+  assert.deepEqual(selected.updates.map(function (update) { return update.values; }), [[12, 3], [60], [9]]);
+});
+
+test("crosshair values never interpolate missing history and the bottom label shows the exact UTC candle time", function () {
+  const timestamp = 1700000900;
+  const series = [
+    { times: [1700000000, timestamp], values: [4, null] },
+    { times: [1700000000], values: [8] },
+    { times: [timestamp], values: [12] }
+  ];
+  assert.deepEqual(valuesAtTimestamp(series, timestamp), [null, null, 12]);
+  assert.equal(formatCrosshairTime(timestamp), "2023-11-14 22:28:20 UTC");
+  assert.equal(formatCrosshairTime(null), "Немає даних");
 });

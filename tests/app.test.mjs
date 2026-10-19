@@ -107,6 +107,16 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   assert.equal(models.Q_USDT.strategy.status, "DATA UNAVAILABLE");
 });
 
+test("visualization crosshair shares pointer interaction across charts and resets on timeframe changes", function () {
+  const stylesheet = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(source, /panel\.addEventListener\("pointerdown"/);
+  assert.match(source, /panel\.addEventListener\("pointermove"/);
+  assert.match(source, /controller\.selectAt\(chartIndex/);
+  assert.match(source, /delete visualizationCrosshairTimes\[pair\]/);
+  assert.match(source, /data-chart-time/);
+  assert.match(stylesheet, /touch-action:\s*none/);
+});
+
 test("partial API failures preserve other timeframes and missing contracts never delete saved pairs", async function () {
   const now = Math.floor(Date.now() / 1000);
   const models = {};
