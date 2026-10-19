@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addPair, buildMarketData, calculateContractMetrics, normalizeCandles, removePair,
+  addPair, buildMarketData, calculateContractMetrics, calculateLevels, normalizeCandles, removePair,
   signalState, sortPairsBySignal, transitionSignal, validatePairList
 } from "../core.mjs";
 import { normalizeContract, normalizeContractStats } from "../gate-api.mjs";
@@ -122,6 +122,80 @@ test("OI changes anchor to the exact closed-candle price interval, not the lates
   assert.equal(metrics.lsrAccountChange15m, (1.12 / 1.09 - 1) * 100);
 });
 
+test("Price × OI cannot borrow stale samples or replace missing 4h history with zero", function () {
+  const metrics = calculateContractMetrics({ quality: "OK", rows: [
+    { time: 3000, openInterest: 100 }, { time: 6600, openInterest: 110 },
+    { time: 9300, openInterest: 120 }, { time: 10200, openInterest: 125 }
+  ] }, { "15m": 10200, "1h": 10200, "4h": 10200 });
+  assert.ok(metrics.oiChanges["15m"] > 0);
+  assert.ok(metrics.oiChanges["1h"] > 0);
+  assert.equal(metrics.oiChanges["4h"], null);
+  const stale = calculateContractMetrics({ quality: "OK", rows: [
+    { time: 3000, openInterest: 100 }, { time: 10000, openInterest: 110 }
+  ] }, { "15m": 11000 });
+  assert.equal(stale.oiChanges["15m"], null);
+});
+
+test("4h OI covers the last closed price interval even when its close is almost four hours old", function () {
+  const now = 1710000000;
+  const rows = Array.from({ length: 100 }, function (_, index) {
+    return { time: now - (99 - index) * 300, openInterest: 100 + index };
+  });
+  const anchors = { "4h": now - 14100 };
+  const complete = calculateContractMetrics({ quality: "OK", rows: rows }, anchors);
+  assert.equal(complete.oiChanges["4h"], (152 / 104 - 1) * 100);
+  const truncated = calculateContractMetrics({ quality: "OK", rows: rows.slice(-60) }, anchors);
+  assert.equal(truncated.oiChanges["4h"], null);
+});
+
+test("radar rejects missing closed-candle intervals rather than evaluating a discontinuous structure", function () {
+  const rows = makeCandles(20, 100, 900, function () { return 0.1; }, function () { return 10; });
+  rows.splice(10, 1);
+  assert.equal(normalizeCandles(rows, "15m", 1700000000 + 20 * 900).quality, "INCOMPLETE");
+});
+
+function levelCandles() {
+  const candles = Array.from({ length: 30 }, function (_, index) {
+    return { time: 1710000000 + index * 900, open: 0.125, high: 0.126,
+      low: 0.124, close: 0.125, volume: 100 };
+  });
+  candles[8].low = 0.115456;
+  candles[10].high = 0.22;
+  candles[29] = { time: candles[29].time, open: 0.123, high: 0.1235,
+    low: 0.1218, close: 0.12214, volume: 300 };
+  return candles;
+}
+
+test("Q_USDT reconstructed closed structure excludes an old 0.22 high and recalculates final R/R", function () {
+  const levels = calculateLevels(levelCandles(), { type: "support_break", startIndex: 26 });
+  assert.equal(levels.valid, true);
+  assert.equal(levels.entry, 0.12214);
+  assert.equal(levels.tp1, 0.115456);
+  assert.ok(levels.stop < 0.13);
+  assert.equal(levels.invalidation, 0.126);
+  assert.ok(levels.stop > levels.entry && levels.tp3 < levels.tp2 && levels.tp2 < levels.tp1);
+  assert.equal(levels.riskReward, (levels.entry - levels.tp1) / (levels.stop - levels.entry));
+});
+
+test("a real but excessively distant local invalidation is rejected, never tightened to manufacture R/R", function () {
+  const candles = levelCandles();
+  candles[28].high = 0.22;
+  const levels = calculateLevels(candles, { type: "support_break", startIndex: 26 });
+  assert.equal(levels.valid, false);
+  assert.ok(levels.stop > 0.22);
+  assert.match(levels.reason, /3 ATR/);
+  assert.equal(levels.riskReward, null);
+});
+
+test("levels require a recent formation and structural support below entry", function () {
+  assert.equal(calculateLevels(levelCandles(), { startIndex: 10 }), null);
+  const candles = levelCandles();
+  candles[8].low = 0.124;
+  const result = calculateLevels(candles, { startIndex: 26 });
+  assert.equal(result.valid, false);
+  assert.match(result.reason, /підтримки/);
+});
+
 test("contract metadata uses the reported funding interval and active status", function () {
   const active = normalizeContract({ name: "BTC_USDT", status: "trading", funding_interval: 28800 });
   const unknown = normalizeContract({ name: "ALT_USDT", status: "trading" });
@@ -224,7 +298,7 @@ test("watchlist ordering prioritizes confirmed SHORT proximity, then signal scor
   assert.deepEqual(sortPairsBySignal(pairs, models), ["setup", "pump-high", "pump-low", "calm", "missing"]);
 });
 
-test("a support break with poor risk/reward is blocked even when the older setup conditions pass", function () {
+test("a support break with a distant stop is blocked even when the older setup conditions pass", function () {
   const now = 1710000000;
   const rows = [];
   const statsRows = [];
@@ -274,14 +348,16 @@ test("a support break with poor risk/reward is blocked even when the older setup
   }
   const model = buildMarketData({
     candles: { "5m": steady(300, 50, 0.01), "15m": rows, "1h": steady(3600, 50, -0.005), "4h": steady(14400, 50, -0.005) },
-    ticker: { quality: "OK", last: Number(rows[59].c), volume24h: 10000000, funding: 0.0005 },
+    ticker: { quality: "OK", last: Number(rows[59].c), volume24h: 10000000, funding: 0.0005, fetchedAt: now * 1000 },
     stats: { rows: statsRows, quality: "OK" },
-    orderBook: { quality: "OK", spreadPercent: 0.1, depthUsd: 50000 },
+    orderBook: { quality: "OK", spreadPercent: 0.1, slippagePercent: 0.05, depthUsd: 50000, fetchedAt: now * 1000 },
     fundingIntervalSeconds: 28800,
     nowSeconds: now
   });
   assert.notEqual(model.state.key, "entry");
-  assert.match(model.strategy.blockers.join(" "), /Reward\/Risk/);
+  assert.match(model.strategy.blockers.join(" "), /Stop надто далекий/);
+  assert.equal(model.levels.valid, false);
+  assert.equal(model.strategy.allowed, false);
   assert.ok(model.levels.stop > model.levels.entry);
   assert.ok(model.levels.tp1 < model.levels.entry);
 });

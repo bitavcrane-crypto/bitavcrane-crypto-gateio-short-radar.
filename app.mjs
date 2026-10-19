@@ -203,15 +203,19 @@ function renderStrategyPanel(model) {
           escapeHtml(strategy.matrixTransitions[interval]) + "</small>" : "") + "</div>";
   }).join("");
   const scoreReasons = strategy.scoreReasons.length ? strategy.scoreReasons.join(" · ") : "Підтвердження для балів відсутні";
-  const missing = strategy.missingScoreData.length ? strategy.missingScoreData.join(" · ") : "Немає";
+  const optionalMissing = strategy.missingScoreData.filter(function (field) {
+    return !strategy.missing.includes(field);
+  });
+  const missing = strategy.missing.length ? strategy.missing.join(" · ") :
+    strategy.dataReady ? "Немає" : "якість обов’язкових даних не підтверджена";
   const blockers = strategy.blockers.length ? strategy.blockers.join(" · ") : "Блокувань немає";
-  const setup = strategy.setup ? strategy.setup.type + " · рівень " + formatNumber(strategy.setup.level, 8) :
-    "Підтвердженого пробою / ретесту немає";
+  const setup = strategy.setup ? strategy.setupStatus + " · " + strategy.setup.type +
+    " · рівень " + formatNumber(strategy.setup.level, 8) : "Формацію не знайдено";
   const updateTime = model.data.orderBook && model.data.orderBook.fetchedAt ?
     new Date(model.data.orderBook.fetchedAt).toLocaleTimeString("uk-UA") : "немає";
   const latestCandle = model.data.candles15[model.data.candles15.length - 1];
-  const confirmation = latestCandle ? "підтвердження close " + formatNumber(latestCandle.close, 8) +
-    " · " + new Date((latestCandle.time + 900) * 1000).toLocaleString("uk-UA") : "точка підтвердження недоступна";
+  const confirmation = latestCandle ? "закриття 15m " + formatNumber(latestCandle.close, 8) +
+    " · " + new Date((latestCandle.time + 900) * 1000).toLocaleString("uk-UA") : "закриття недоступне";
   const levels = model.levels ? "Entry " + formatNumber(model.levels.entry, 8) +
     " · Stop " + formatNumber(model.levels.stop, 8) + " · TP1/2/3 " +
     [model.levels.tp1, model.levels.tp2, model.levels.tp3].map(function (value) {
@@ -219,10 +223,14 @@ function renderStrategyPanel(model) {
     }).join(" / ") + " · R/R 1 : " + formatNumber(model.levels.riskReward, 2) :
     "Entry/Stop/цілі не розраховані";
   return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
-    escapeHtml(setup) + '</strong><span>' + (strategy.allowed ? "SHORT ENTRY дозволено" : "NO TRADE") + "</span></div>" +
+    escapeHtml(setup) + '</strong><span>' + escapeHtml(strategy.status) + "</span></div>" +
     '<div class="strategy-matrix">' + matrix + "</div><p><strong>SHORT SCORE " + strategy.score +
-    "/100:</strong> " + escapeHtml(scoreReasons) + "</p><p><strong>Відсутні дані:</strong> " +
+    "/100:</strong> " + escapeHtml(scoreReasons) +
+    (optionalMissing.length ? " · Додаткові дані для score: " + escapeHtml(optionalMissing.join(" · ")) : "") +
+    "</p><p><strong>Відсутні дані:</strong> " +
     escapeHtml(missing) + "</p><p><strong>Блокування:</strong> " + escapeHtml(blockers) +
+    "</p><p><strong>Ліквідність:</strong> " + escapeHtml(strategy.liquidity.passed ?
+      "ліквідність і спред придатні" : "непридатна або неперевірена; причини наведені вище") +
     "</p><p><strong>Рівні:</strong> " + escapeHtml(levels) + " · " + escapeHtml(confirmation) +
     "</p><p class=\"strategy-time\">Книга заявок оновлена: " + escapeHtml(updateTime) +
     " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
@@ -409,8 +417,7 @@ function renderIndicatorVisualization(pair) {
           { label: "Обсяг контрактів, 15m" }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Open Interest · 5m історія</h4>' +
         chartSvg([{ values: oiHistory.map(function (row) { return row.openInterest; }), color: "#49d4a5" }],
-          { label: "Open Interest з Gate.io contract stats" }) + "</section></div>" +
-        renderStrategyPanel(model);
+        { label: "Open Interest з Gate.io contract stats" }) + "</section></div>";
     })() : "") +
     '<p class="visualization-summary">' + escapeHtml(summary) +
     (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
@@ -465,7 +472,9 @@ function renderCard(pair) {
       '<div class="level"><span>TP2</span><strong>' + formatNumber(levelData.tp2, 6) + '</strong></div>' +
       '<div class="level"><span>TP3</span><strong>' + formatNumber(levelData.tp3, 6) + '</strong></div>' +
     '</div><p class="quality-note">R:R до TP1 = 1 : ' + formatNumber(levelData.riskReward, 2) +
-      ' · *Оцінка за закриттям 15m</p>' : '<p class="quality-note">Entry/Stop/TP з’являться лише для SHORT SETUP або SHORT ENTRY.</p>';
+      ' · *Оцінка за закриттям 15m' + (levelData.valid === false ?
+        " · NO TRADE: рівні невалідні" : "") +
+      '</p>' : '<p class="quality-note">Entry/Stop/TP з’являться лише для знайденого сетапу з локальною інвалідацією.</p>';
   const qualityNotes = [];
   if (model.quality !== "OK") qualityNotes.push("Якість оцінки: " + model.quality);
   if (model.state.key === "incomplete" && model.quality === "STALE") {
@@ -625,6 +634,11 @@ function markPairUnavailable(pair, message) {
     allowed: false,
     dataReady: false,
     missingData: true,
+    missing: ["останні дані застаріли: " + message],
+    status: "DATA UNAVAILABLE",
+    setupStatus: models[pair].strategy.setup ? "SETUP DETECTED" : null,
+    setupConfirmed: false,
+    liquidity: { passed: false, reasons: ["останні дані застаріли"] },
     blockers: [unavailableReason],
     score: 0,
     scoreReasons: [],
