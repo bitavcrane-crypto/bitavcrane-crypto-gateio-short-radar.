@@ -645,6 +645,30 @@ export function sortPairsBySignal(pairs, models) {
   }).map(function (item) { return item.pair; });
 }
 
+export function rankPumpCandidates(tickers, activeContracts, limit, minimumChange, minimumVolume) {
+  if (!Array.isArray(tickers) || !Array.isArray(activeContracts)) return [];
+  const allowed = new Set(activeContracts);
+  const candidates = [];
+  tickers.forEach(function (ticker) {
+    if (!ticker || typeof ticker.contract !== "string" || !allowed.has(ticker.contract) ||
+        !/^[A-Z0-9]+_USDT$/.test(ticker.contract)) return;
+    const change = number(ticker.change_percentage);
+    const volume = number(ticker.volume_24h_quote);
+    if (!finite(change) || !finite(volume) || change < minimumChange || volume < minimumVolume) return;
+    candidates.push({
+      contract: ticker.contract,
+      changePercentage: change,
+      volume24hQuote: volume
+    });
+  });
+  candidates.sort(function (a, b) {
+    return b.changePercentage - a.changePercentage ||
+      b.volume24hQuote - a.volume24hQuote ||
+      a.contract.localeCompare(b.contract);
+  });
+  return candidates.slice(0, Math.max(0, Math.floor(limit)));
+}
+
 export function validatePairList(value, allowedContracts) {
   const allowed = new Set(allowedContracts);
   if (!Array.isArray(value)) return [];
