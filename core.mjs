@@ -363,17 +363,29 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const candles = data.candles15;
   const indicators = data.indicators;
   const missing = [];
-  if (!usableCandles || candles.length < 6) {
-    if (data.qualities["15m"] !== QUALITY.OK || candles.length < 6) {
-      missing.push("потрібна якісна історія закритих 15m свічок");
+  const volumeEvidence = finite(data.volumeRatio) ?
+    "RVOL " + data.volumeRatio.toFixed(2) + "× від середнього 20 попередніх закритих 15m свічок" :
+    "RVOL недоступний";
+  if (!finite(data.volumeRatio)) missing.push("відносний обсяг (RVOL) недоступний");
+  if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має неякісні дані");
+  if (data.stats.quality !== QUALITY.OK || !finite(data.oiChange15m)) {
+    missing.push("OI/деривативи недоступні або неякісні");
+  }
+  if (!finite(data.fundingNormalized)) missing.push("funding або його інтервал недоступний");
+  if (!usableCandles || data.qualities["15m"] !== QUALITY.OK || candles.length < 7) {
+    if (data.qualities["15m"] !== QUALITY.OK) {
+      missing.push("якість свічок 15m: " + data.qualities["15m"]);
+    } else if (candles.length < 7) {
+      missing.push("потрібні щонайменше 7 закритих 15m свічок");
     }
-    if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має конфлікт");
     return {
       key: "insufficient",
       label: "Даних недостатньо",
       supportingShort: [],
       againstShort: [],
       missing: missing,
+      priceMomentum: "не оцінено через недостатню або неякісну історію",
+      volumeEvidence: volumeEvidence,
       continuationRisk: "неможливо оцінити"
     };
   }
@@ -405,10 +417,12 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const distributionPossible = structureWeak && momentumWeak;
   const positivePrice = [data.changes["5m"], data.changes["15m"], data.changes["1h"]]
     .some(function (change) { return finite(change) && change > 0; });
+  const previous45mReturn = relativeChange(candles[candles.length - 4].close, candles[candles.length - 7].close);
+  const recent45mReturn = relativeChange(candles[candles.length - 1].close, candles[candles.length - 4].close);
+  const decelerating = finite(previous45mReturn) && previous45mReturn > 0 &&
+    finite(recent45mReturn) && recent45mReturn >= 0 && recent45mReturn < previous45mReturn * 0.75;
   const activeUptrend = pump >= 45 && latest.close > latest.open && positivePrice &&
-    !structureWeak && !momentumWeak;
-  const decelerating = finite(data.changes["15m"]) && finite(data.changes["5m"]) &&
-    data.changes["15m"] > 0 && data.changes["5m"] < data.changes["15m"] * 0.35;
+    !structureWeak && !momentumWeak && !decelerating;
   const exhaustionWatch = pump >= 45 && (structureWeak || momentumWeak || decelerating || upperWick ||
     (finite(indicators.rsi) && indicators.rsi >= 75 && !activeUptrend) || exhaustion >= 45);
 
@@ -420,6 +434,9 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   if (indicators.obvDivergence) supportingShort.push("OBV не підтверджує локальний максимум ціни");
   if (volumeFading) supportingShort.push("середній обсяг останніх трьох свічок слабший за попередній блок");
   if (bearishMomentum) supportingShort.push("ведмежий перетин MACD разом із верхньою тінню");
+  if (decelerating) {
+    supportingShort.push("темп зростання ціни за останні 45 хв сповільнився порівняно з попередніми 45 хв");
+  }
   if (latest.close > latest.open && positivePrice) {
     againstShort.push("остання 15m свічка зростає та короткострокова зміна ціни позитивна");
   }
@@ -429,13 +446,16 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   if (finite(indicators.rsi) && indicators.rsi >= 75 && activeUptrend) {
     againstShort.push("високий RSI не переважає чинний висхідний імпульс і сам не є сигналом SHORT");
   }
-  if (!finite(data.volumeRatio)) missing.push("відносний обсяг (RVOL) недоступний");
   if (!indicators.macd || !finite(indicators.rsi)) missing.push("RSI/MACD: недостатньо свічкової історії");
-  if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має неякісні дані");
-  if (data.stats.quality !== QUALITY.OK || !finite(data.oiChange15m)) {
-    missing.push("OI/деривативи недоступні або неякісні");
-  }
-  if (!finite(data.fundingNormalized)) missing.push("funding або його інтервал недоступний");
+  const priceMomentum = decelerating ?
+    "за останні 45 хв +" + recent45mReturn.toFixed(2) + "% проти +" + previous45mReturn.toFixed(2) +
+      "% за попередні 45 хв" :
+    finite(recent45mReturn) && recent45mReturn > 0 ?
+      "позитивні " + recent45mReturn.toFixed(2) + "% за останні 45 хв; уповільнення не підтверджено" :
+      "позитивне зростання за останні 45 хв не підтверджено";
+  const volumeContinuation = finite(data.volumeRatio) ?
+    (data.volumeRatio >= 1.5 ? "RVOL підвищений: " : "RVOL не підвищений: ") + volumeEvidence :
+    "обсяг не підтверджений: " + volumeEvidence;
 
   let key = "none";
   let label = "Немає сетапу";
@@ -459,8 +479,10 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
     supportingShort: supportingShort,
     againstShort: againstShort,
     missing: missing,
-    continuationRisk: reversalConfirmed ? "нижчий після зламу структури; squeeze-ризик залишається" :
-      activeUptrend ? "підвищений: висхідна ціна й обсяг зберігаються" :
+    priceMomentum: priceMomentum,
+    volumeEvidence: volumeEvidence,
+    continuationRisk: reversalConfirmed ? "структура ціни зламана; squeeze-ризик залишається" :
+      activeUptrend ? "підвищений через позитивний імпульс ціни; " + volumeContinuation :
         pump >= 45 ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
   };
 }

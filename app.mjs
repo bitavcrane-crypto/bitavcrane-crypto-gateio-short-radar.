@@ -236,6 +236,8 @@ function renderStrategyPanel(model) {
     supportingShort: [],
     againstShort: [],
     missing: ["оцінка стадії недоступна"],
+    priceMomentum: "не оцінено",
+    volumeEvidence: "недоступний",
     continuationRisk: "неможливо оцінити"
   };
   const matrix = ["15m", "1h", "4h"].map(function (interval) {
@@ -274,6 +276,8 @@ function renderStrategyPanel(model) {
     '<div class="market-stage"><strong>Стадія пампу: ' + escapeHtml(stage.label) +
     '</strong><span>Ризик продовження: ' + escapeHtml(stage.continuationRisk) + '</span></div>' +
     '<details class="stage-evidence"><summary>Підтвердження, суперечності та доступність даних</summary>' +
+    '<p><strong>Динаміка ціни:</strong> ' + escapeHtml(stage.priceMomentum || "не оцінено") + '</p>' +
+    '<p><strong>Обсяг:</strong> ' + escapeHtml(stage.volumeEvidence || "недоступний") + '</p>' +
     '<p><strong>На користь SHORT:</strong> ' + escapeHtml(evidence(stage.supportingShort)) + '</p>' +
     '<p><strong>Проти SHORT:</strong> ' + escapeHtml(evidence(stage.againstShort)) + '</p>' +
     '<p><strong>Не перевірено:</strong> ' + escapeHtml(evidence(stage.missing)) + '</p></details>' +
@@ -1008,6 +1012,8 @@ function markPairUnavailable(pair, message) {
       supportingShort: [],
       againstShort: [],
       missing: ["оновлення не вдалося; попередня оцінка застаріла"],
+      priceMomentum: "не оцінено: дані після помилки оновлення застарілі",
+      volumeEvidence: "недоступний: дані після помилки оновлення застарілі",
       continuationRisk: "неможливо оцінити"
     },
     quality: "STALE",

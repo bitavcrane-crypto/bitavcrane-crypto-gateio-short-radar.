@@ -65,10 +65,14 @@ test("market-stage evidence is displayed inside the existing strategy panel", fu
     supportingShort: ["нижчі максимуми"],
     againstShort: ["ціна зростає"],
     missing: ["OI недоступний"],
+    priceMomentum: "зростання ціни за 45 хв",
+    volumeEvidence: "RVOL недоступний",
     continuationRisk: "підвищений"
   };
   const html = renderPanel(value);
   assert.match(html, /Стадія пампу: Можлива дистрибуція/);
+  assert.match(html, /Динаміка ціни:<\/strong> зростання ціни за 45 хв/);
+  assert.match(html, /Обсяг:<\/strong> RVOL недоступний/);
   assert.match(html, /нижчі максимуми/);
   assert.match(html, /ціна зростає/);
   assert.match(html, /OI недоступний/);

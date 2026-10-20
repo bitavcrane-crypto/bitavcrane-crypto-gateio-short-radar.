@@ -300,7 +300,57 @@ test("strong rising pump remains active despite high RSI", function () {
   assert.ok(model.data.indicators.rsi >= 75);
   assert.equal(model.stage.key, "active");
   assert.match(model.stage.againstShort.join(" "), /високий RSI не переважає/);
+  assert.match(model.stage.priceMomentum, /уповільнення не підтверджено/);
+  assert.match(model.stage.volumeEvidence, /RVOL .*від середнього 20/);
   assert.notEqual(model.state.key, "entry");
+  assert.equal(model.strategy.allowed, false);
+});
+
+test("genuine price deceleration compares equal 45-minute windows from closed 15m candles", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index >= 54 && index <= 56) return 5;
+    if (index === 59) return 3.2;
+    if (index >= 57) return 1;
+    return 0.05;
+  }, function (index) { return index === 59 ? 200 : 10; });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 1 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.stage.key, "exhaustion");
+  assert.match(model.stage.priceMomentum, /останні 45 хв.*попередні 45 хв/);
+  assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("сповільнився"); }));
+  assert.notEqual(model.strategy.allowed, true);
+});
+
+test("missing volume remains unavailable and is not described as elevated or holding", function () {
+  const now = 1710000000;
+  const noVolume = function (candles) {
+    return candles.map(function (candle) {
+      const result = Object.assign({}, candle);
+      delete result.v;
+      return result;
+    });
+  };
+  const model = buildMarketData({
+    candles: {
+      "5m": noVolume(makeTimedCandles(60, now, 300, function () { return 0.1; }, function () { return 10; })),
+      "15m": noVolume(makeTimedCandles(60, now, 900, function () { return 0.1; }, function () { return 10; })),
+      "1h": makeTimedCandles(60, now, 3600, function () { return 0.1; }, function () { return 10; }),
+      "4h": makeTimedCandles(60, now, 14400, function () { return 0.1; }, function () { return 10; })
+    },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.equal(model.data.volumeRatio, null);
+  assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
+  assert.match(model.stage.missing.join(" "), /RVOL.*недоступний/);
+  assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);
 });
 
 test("lower highs and fading volume from independent groups indicate possible distribution", function () {
@@ -348,6 +398,7 @@ test("closed support break with bearish hourly structure confirms reversal stage
   assert.equal(model.stage.key, "reversal");
   assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("нижче мінімумів"); }));
   assert.notEqual(model.state.key, "entry");
+  assert.equal(model.strategy.allowed, false);
 });
 
 test("insufficient candle history produces an unavailable stage instead of a directional assessment", function () {
@@ -358,6 +409,7 @@ test("insufficient candle history produces an unavailable stage instead of a dir
   assert.equal(model.stage.key, "insufficient");
   assert.equal(model.stage.continuationRisk, "неможливо оцінити");
   assert.ok(model.stage.missing.length > 0);
+  assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
 });
 
 test("lifecycle states distinguish calm, pump, overheating, exhaustion, setup, entry and unavailable data", function () {
@@ -599,6 +651,14 @@ test("complete closed-candle and stats pipeline permits entry only after every m
   assert.equal(model.strategy.allowed, true);
   assert.equal(model.confirmed, true);
   assert.equal(model.state.key, "entry");
+  assert.equal(model.pumpScore, 23);
+  assert.equal(model.exhaustionScore, 0);
+  assert.equal(model.shortScore, 81);
+  assert.equal(model.strategy.status, "SHORT ENTRY");
+  assert.deepEqual(
+    [model.levels.entry, model.levels.stop, model.levels.tp1, model.levels.tp2, model.levels.tp3],
+    [97.3, 100.69, 91.3, 88.3, 85.3]
+  );
   assert.ok(model.strategy.netRiskReward >= 1.5);
   input.orderBook.depthUsd = 9999;
   const blocked = buildMarketData(input);
