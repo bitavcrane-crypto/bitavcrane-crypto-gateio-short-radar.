@@ -168,7 +168,7 @@ test("numeric parsing rejects coerced booleans, containers and whitespace withou
   assert.equal(normalizeContractStats([{ time: 1710000000, long_liq_usd: "0" }], 1710000000).rows[0].longLiquidationUsd, 0);
 });
 
-test("Gate top trader long and short OI fields are normalized independently in contracts", function () {
+test("optional top_long_size and top_short_size values are preserved independently when supplied", function () {
   const stats = normalizeContractStats([{
     time: 1710000000,
     open_interest: "1000",
@@ -237,4 +237,59 @@ test("HTTP rate limits, malformed JSON and partial schemas fail without successf
   await assert.rejects(fetchContractStats("Q_USDT"), /malformed JSON/);
   globalThis.fetch = async function () { return { ok: true, json: async function () { return { label: "error" }; } }; };
   await assert.rejects(fetchContractStats("Q_USDT"), /Некоректна статистика/);
+});
+
+test("visualization candles and OI statistics combine removal cancellation with the existing timeout", async function (context) {
+  clearCache();
+  const timeouts = [];
+  context.mock.method(AbortSignal, "timeout", function (milliseconds) {
+    assert.equal(milliseconds, 15000);
+    const controller = new AbortController();
+    timeouts.push(controller);
+    return controller.signal;
+  });
+  const signals = [];
+  context.mock.method(globalThis, "fetch", async function (_, options) {
+    signals.push(options.signal);
+    return new Promise(function (_, reject) {
+      options.signal.addEventListener("abort", function () { reject(options.signal.reason); }, { once: true });
+    });
+  });
+  context.after(clearCache);
+  const removal = new AbortController();
+  const candles = fetchVisualizationCandles("Q_USDT", "15m", removal.signal);
+  const candleRejection = assert.rejects(candles, { name: "AbortError" });
+  assert.notEqual(signals[0], removal.signal);
+  removal.abort();
+  await candleRejection;
+  assert.equal(signals[0].aborted, true);
+  const stats = fetchContractStats("Q_USDT", new AbortController().signal);
+  const statsRejection = assert.rejects(stats, { name: "TimeoutError" });
+  timeouts[1].abort(new DOMException("Timed out", "TimeoutError"));
+  await statsRejection;
+  assert.equal(signals[1].aborted, true);
+});
+
+test("a removed OI request is rejected even during body parsing and never populates the cache", async function (context) {
+  clearCache();
+  let finishBody;
+  let calls = 0;
+  context.mock.method(globalThis, "fetch", async function () {
+    calls += 1;
+    return { ok: true, json: function () {
+      return calls === 1 ? new Promise(function (resolve) { finishBody = resolve; }) : [];
+    } };
+  });
+  context.after(clearCache);
+  const controller = new AbortController();
+  const pending = fetchContractStats("Q_USDT", controller.signal);
+  const rejection = assert.rejects(pending, { name: "AbortError" });
+  await Promise.resolve();
+  controller.abort();
+  finishBody([{ time: 1710000000, top_long_size: "1", top_short_size: "2" }]);
+  await rejection;
+  await fetchContractStats("Q_USDT");
+  assert.equal(calls, 2);
+  await assert.rejects(fetchContractStats("Q_USDT", controller.signal), { name: "AbortError" });
+  assert.equal(calls, 2);
 });

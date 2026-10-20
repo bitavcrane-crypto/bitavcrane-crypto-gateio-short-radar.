@@ -39,6 +39,9 @@ let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
 let openInterestSelections = loadOpenInterestSelections();
 let visualizationData = {};
+let visualizationRequests = {};
+let statsRequests = {};
+let pairVersions = {};
 let visualizationCrosshairTimes = {};
 let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
@@ -392,7 +395,7 @@ function hasBullishFourHourTrend(pair, interval) {
 
 function renderIndicatorVisualization(pair) {
   const interval = selectedVisualizationInterval(pair);
-  const openInterestInterval = selectedOpenInterestInterval(pair);
+  const oiPanel = renderOpenInterestVisualization(pair);
   const data = visualizationData[pair] && visualizationData[pair][interval];
   const cacheTime = data && data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString("uk-UA") : "немає";
   const lastCandle = data && data.candles && data.candles.length ?
@@ -404,23 +407,23 @@ function renderIndicatorVisualization(pair) {
       return '<option value="' + item + '"' + (item === interval ? " selected" : "") + ">" + item + "</option>";
     }).join("") + '</select></label></div>';
   if (!data || data.loading || (!data.candles && !data.error)) {
-    return header + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>";
+    return header + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>" + oiPanel;
   }
   if (data.error && (!data.candles || !data.candles.length)) {
     return header + '<p class="visualization-message">Дані тимчасово недоступні · ' +
-      escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>";
+      escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" + oiPanel;
   }
   if (!data.candles || !data.candles.length) {
-    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
+    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
   }
   const view = buildIndicatorVisualization(data.candles, currentChartSettings(), Math.floor(Date.now() / 1000),
     VISUALIZATION_INTERVALS[interval]);
   if (view.status === "incomplete") {
     return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
-      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>';
+      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>' + oiPanel;
   }
   if (view.status !== "ok") {
-    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>';
+    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
   }
   const indicators = view.indicators;
   const model = models[pair];
@@ -497,7 +500,12 @@ function renderIndicatorVisualization(pair) {
   const summary = model && model.state ? "Базовий радар: " + model.state.label +
     ". Індикатори цього таймфрейму — окремий контекст; потрібне підтвердження ціною." :
     "Базовий радар очікує дані. Графіки не змінюють його сигнали.";
-  return header + (data.error ? '<p class="visualization-message">Дані тимчасово недоступні · показано останній успішний набір · ' +
+  const stale = Math.floor(Date.now() / 1000) - (view.latestCandleTime + VISUALIZATION_INTERVALS[interval]) >=
+    VISUALIZATION_INTERVALS[interval];
+  return header + (stale || (data.quality && data.quality !== "OK") ?
+    '<p class="visualization-message">Стан свічок: ' + escapeHtml(stale ? "STALE" : data.quality) +
+      " · показано історичні дані, не поточне підтвердження.</p>" : "") +
+    (data.error ? '<p class="visualization-message">Дані тимчасово недоступні · показано останній успішний набір · ' +
     escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" : "") +
     '<div class="visualization-meta">' + view.candles.length + " закритих " + interval +
     " свічок · остання свічка: " + escapeHtml(lastCandle) + " · дані оновлено: " + cacheTime + "</div>" +
@@ -510,35 +518,6 @@ function renderIndicatorVisualization(pair) {
     (model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
-      const oiView = buildOpenInterestSeries(model.data.oiVisualizationHistory || [], openInterestInterval,
-        Math.floor(Date.now() / 1000));
-      const oiHistory = oiView.rows;
-      const oiTimes = oiHistory.map(function (row) { return row.time; });
-      const oiLongValues = oiHistory.map(function (row) { return row.topLongOpenInterest; });
-      const oiShortValues = oiHistory.map(function (row) { return row.topShortOpenInterest; });
-      const oiLongPoints = oiLongValues.filter(function (value) { return Number.isFinite(value); }).length;
-      const oiShortPoints = oiShortValues.filter(function (value) { return Number.isFinite(value); }).length;
-      const oiLastTime = oiHistory.filter(function (row) {
-        return Number.isFinite(row.topLongOpenInterest) || Number.isFinite(row.topShortOpenInterest);
-      }).map(function (row) { return row.time; }).pop();
-      const oiQuality = model.data.stats.quality;
-      const oiWarning = oiQuality === "OK" ? "" :
-        '<p class="chart-empty">Стан джерела OI: ' + escapeHtml(oiQuality) +
-          (Number.isFinite(oiLastTime) ? " · остання точка: " +
-            escapeHtml(new Date(oiLastTime * 1000).toLocaleString("uk-UA")) : "") + ".</p>";
-      const oiContent = oiView.status !== "ok" ?
-        '<p class="chart-empty">Немає завершених точок top long/short OI у відповіді Gate.</p>' :
-          (oiLongPoints < 2 || oiShortPoints < 2 ?
-            '<p class="chart-empty">Для кожної лінії потрібно дві завершені точки; LONG: ' +
-              oiLongPoints + " · SHORT: " + oiShortPoints + ".</p>" : "") +
-          chartSvg([{
-            values: oiLongValues, color: "#49d4a5", label: "TOP LONG OI · contracts", digits: 2, times: oiTimes
-          }, {
-            values: oiShortValues, color: "#f18c8c", label: "TOP SHORT OI · contracts", digits: 2, times: oiTimes
-          }], {
-            label: "Top trader long/short open interest у контрактах, " + openInterestInterval,
-            times: oiTimes, domainTimes: oiTimes
-          });
       return '<div class="indicator-chart-grid market-chart-grid">' +
         '<section class="indicator-chart-card"><h4>Ціна · ' + interval + "</h4>" +
         chartSvg([{
@@ -555,24 +534,63 @@ function renderIndicatorVisualization(pair) {
         chartSvg([{
           values: recent.map(function (candle) { return candle.volume; }),
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
-        }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section>" +
-        '<section class="indicator-chart-card"><div class="oi-chart-heading"><h4>Top trader OI · ' +
-        escapeHtml(openInterestInterval) + '</h4><label>OI: <select data-oi-visualization-timeframe="' +
-        escapeHtml(pair) + '" aria-label="OI timeframe ' + escapeHtml(pair) + '">' +
-        Object.keys(OPEN_INTEREST_INTERVALS).map(function (item) {
-          return '<option value="' + item + '"' + (item === openInterestInterval ? " selected" : "") +
-            ">" + item + "</option>";
-        }).join("") + "</select></label></div>" +
-        '<p class="oi-legend"><span class="oi-long">TOP LONG OI · contracts</span>' +
-          '<span class="oi-short">TOP SHORT OI · contracts</span></p>' + oiWarning + oiContent +
-        '<p class="chart-footnote">За Gate, top_long_size і top_short_size — OI топтрейдерів у контрактах, а не всього ринку. Загальний open_interest та lsr_account/lsr_taker не підміняють ці серії. Інтервал формується останнім 5m знімком у кожному завершеному вікні; пропуски не інтерполюються.</p>' +
-        "</section></div>";
-    })() : "") +
+        }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section></div>";
+    })() : "") + oiPanel +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
     escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
     (higherTrendConflict ? " Старший 4h підтверджує висхідний тренд, тоді як молодший інтервал показує ознаки розвороту: це ризик контртрендового входу." :
       " Перекупленість сама по собі не є умовою SHORT; підтвердження ціною залишається необхідним.") + "</p>";
+}
+
+function renderOpenInterestVisualization(pair) {
+  const openInterestInterval = selectedOpenInterestInterval(pair);
+  const model = models[pair];
+  const data = model && model.data;
+  const oiView = buildOpenInterestSeries(data && data.oiVisualizationHistory || [], openInterestInterval,
+    Math.floor(Date.now() / 1000));
+  const oiTimes = oiView.rows.map(function (row) { return row.time; });
+  const oiLongValues = oiView.rows.map(function (row) { return row.topLongOpenInterest; });
+  const oiShortValues = oiView.rows.map(function (row) { return row.topShortOpenInterest; });
+  const oiQuality = data && data.stats ? data.stats.quality : "NO DATA";
+  const sourceStatus = [["LONG", oiView.source.long, "top_long_size"],
+    ["SHORT", oiView.source.short, "top_short_size"]].map(function (entry) {
+    const state = entry[1];
+    const status = state.status === "ok" ? "OK" : state.status === "missing" ? "MISSING" :
+      state.status === "stale" ? "STALE" : "UNAVAILABLE";
+    return entry[0] + ": " + status + (state.stale && status !== "STALE" ? " / STALE" : "") +
+      (state.status === "missing" || state.status === "unavailable" ? " · немає даних поля " + entry[2] : "") +
+      " · останній фактичний 5m знімок: " +
+      (state.lastTime === null ? "немає" : new Date(state.lastTime * 1000).toLocaleString("uk-UA"));
+  }).join(" · ");
+  const counts = [oiLongValues, oiShortValues].map(function (values) {
+    return values.filter(function (value) { return Number.isFinite(value); }).length;
+  });
+  return '<section class="indicator-chart-card"><div class="oi-chart-heading"><h4>Top trader OI · ' +
+    escapeHtml(openInterestInterval) + '</h4><label>OI: <select data-oi-visualization-timeframe="' +
+    escapeHtml(pair) + '" aria-label="OI timeframe ' + escapeHtml(pair) + '">' +
+    Object.keys(OPEN_INTEREST_INTERVALS).map(function (item) {
+      return '<option value="' + item + '"' + (item === openInterestInterval ? " selected" : "") +
+        ">" + item + "</option>";
+    }).join("") + "</select></label></div>" +
+    '<p class="oi-legend"><span class="oi-long">TOP LONG OI · contracts</span>' +
+      '<span class="oi-short">TOP SHORT OI · contracts</span></p>' +
+    '<p class="chart-summary">' + escapeHtml(sourceStatus) + "</p>" +
+    (oiQuality !== "OK" ? '<p class="chart-empty">Стан джерела OI: ' + escapeHtml(oiQuality) + ".</p>" : "") +
+    (openInterestInterval === "4h" && (counts[0] < 2 || counts[1] < 2) ?
+      '<p class="chart-empty">Недостатньо завершеної 4h історії для двох точок кожної лінії. Запит 100 знімків 5m не гарантує двох повних UTC-вікон 4h; часткові вікна не доповнюються. Свіжість джерела наведена окремо.</p>' : "") +
+    (oiView.status !== "ok" ? '<p class="chart-empty">Немає завершених точок top long/short OI у поточному вікні графіка.</p>' :
+      (counts[0] < 2 || counts[1] < 2 ? '<p class="chart-empty">Для кожної лінії потрібно дві завершені точки; LONG: ' +
+        counts[0] + " · SHORT: " + counts[1] + ".</p>" : "") +
+      (counts.some(function (count) { return count >= 2; }) ? chartSvg([{
+        values: oiLongValues, color: "#49d4a5", label: "TOP LONG OI · contracts", digits: 2, times: oiTimes
+      }, {
+        values: oiShortValues, color: "#f18c8c", label: "TOP SHORT OI · contracts", digits: 2, times: oiTimes
+      }], {
+        label: "Top trader long/short open interest у контрактах, " + openInterestInterval,
+        times: oiTimes, domainTimes: oiTimes
+      }) : "")) +
+    '<p class="chart-footnote">Якщо Gate повертає top_long_size і top_short_size, графік показує ці документовані поля окремими серіями TOP LONG/SHORT OI у контрактах. Чинна схема ContractStat Python SDK Gate описує OI топтрейдерів, а не всього ринку; фактична наявність полів у live-відповіді не перевірена. Загальний open_interest та lsr_account/lsr_taker/top_lsr_size не підміняють ці серії. Інтервал формується останнім 5m знімком у кожному завершеному вікні лише за повної послідовності поля; пропуски не інтерполюються. Час знімків джерела не є часом останньої агрегованої точки.</p></section>';
 }
 
 function renderVisualizationControl(pair) {
@@ -805,6 +823,12 @@ function render() {
   cardsNode.querySelectorAll("[data-remove]").forEach(function (button) {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-remove");
+      pairVersions[pair] = (pairVersions[pair] || 0) + 1;
+      cancelVisualizationRequest(pair);
+      if (statsRequests[pair]) {
+        statsRequests[pair].abort();
+        delete statsRequests[pair];
+      }
       pairs = removePair(pairs, pair);
       delete models[pair];
       delete pairErrors[pair];
@@ -822,7 +846,10 @@ function render() {
   cardsNode.querySelectorAll("[data-visualization]").forEach(function (button) {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-visualization");
-      if (openVisualizations.has(pair)) openVisualizations.delete(pair);
+      if (openVisualizations.has(pair)) {
+        openVisualizations.delete(pair);
+        cancelVisualizationRequest(pair);
+      }
       else {
         openVisualizations.add(pair);
         ensureVisualizationData(pair, selectedVisualizationInterval(pair));
@@ -852,15 +879,20 @@ function render() {
 }
 
 async function ensureVisualizationData(contract, interval) {
-  if (!VISUALIZATION_INTERVALS[interval]) return;
+  if (!VISUALIZATION_INTERVALS[interval] || !pairs.includes(contract)) return;
+  const active = visualizationRequests[contract];
+  if (active && active.interval !== interval) cancelVisualizationRequest(contract);
   if (!visualizationData[contract]) visualizationData[contract] = {};
   const existing = visualizationData[contract][interval] || {};
   if (existing.loading || (existing.updatedAt && Date.now() - existing.updatedAt < POLL_MS && !existing.error)) return;
   existing.loading = true;
   delete existing.error;
   visualizationData[contract][interval] = existing;
+  const request = { interval: interval, controller: new AbortController() };
+  visualizationRequests[contract] = request;
   try {
-    const rows = await fetchVisualizationCandles(contract, interval);
+    const rows = await fetchVisualizationCandles(contract, interval, request.controller.signal);
+    if (visualizationRequests[contract] !== request || !pairs.includes(contract)) return;
     const nowSeconds = Math.floor(Date.now() / 1000);
     const normalized = normalizeCandles(rows, interval, nowSeconds);
     if (!normalized.candles.length) throw new Error("Gate.io не повернув завершені свічки");
@@ -868,12 +900,26 @@ async function ensureVisualizationData(contract, interval) {
     existing.quality = normalized.quality;
     existing.updatedAt = Date.now();
   } catch (error) {
-    existing.error = error.message || "помилка API";
+    if (visualizationRequests[contract] === request && !request.controller.signal.aborted) {
+      existing.error = error.message || "помилка API";
+    }
   } finally {
-    existing.loading = false;
-    visualizationData[contract][interval] = existing;
-    render();
+    if (visualizationRequests[contract] === request && pairs.includes(contract) && visualizationData[contract]) {
+      delete visualizationRequests[contract];
+      existing.loading = false;
+      visualizationData[contract][interval] = existing;
+      render();
+    }
   }
+}
+
+function cancelVisualizationRequest(contract) {
+  const request = visualizationRequests[contract];
+  if (!request) return;
+  delete visualizationRequests[contract];
+  const data = visualizationData[contract] && visualizationData[contract][request.interval];
+  if (data) data.loading = false;
+  request.controller.abort();
 }
 
 function refreshOpenVisualizations() {
@@ -1059,15 +1105,24 @@ async function scan() {
       if (item && typeof item.contract === "string") tickerMap.set(item.contract, item);
     });
     const failures = [];
-    await mapLimited(pairs, 3, async function (pair) {
+    await mapLimited(pairs.slice(), 3, async function (pair) {
+      if (!pairs.includes(pair)) return;
+      const version = pairVersions[pair] || 0;
+      const statsController = new AbortController();
+      statsRequests[pair] = statsController;
+      function isCurrent() {
+        return pairs.includes(pair) && (pairVersions[pair] || 0) === version &&
+          statsRequests[pair] === statsController;
+      }
       try {
         if (!contractMap.has(pair)) throw new Error("Контракт відсутній в активному списку Gate.io; пару збережено");
         const settled = await Promise.allSettled([
           fetchCandles(pair, "5m"), fetchCandles(pair, "15m"),
           fetchCandles(pair, "1h"), fetchCandles(pair, "4h"),
-          fetchContractStats(pair),
+          fetchContractStats(pair, statsController.signal),
           fetchOrderBook(pair)
         ]);
+        if (!isCurrent()) return;
         const fields = ["candles.5m", "candles.15m", "candles.1h", "candles.4h", "stats", "orderBook"];
         const responses = settled.map(function (result, index) {
           if (result.status === "fulfilled") return result.value;
@@ -1099,8 +1154,11 @@ async function scan() {
         });
         delete pairErrors[pair];
       } catch (error) {
+        if (!isCurrent()) return;
         failures.push(pair + ": " + error.message);
         markPairUnavailable(pair, error.message);
+      } finally {
+        if (statsRequests[pair] === statsController) delete statsRequests[pair];
       }
     });
     connectionNode.textContent = failures.length ? "⚠️ Частина даних недоступна" : "Gate.io API · оновлено";
