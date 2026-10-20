@@ -26,6 +26,12 @@ function makeCandles(count, start, interval, trend, volume) {
   return rows;
 }
 
+function makeTimedCandles(count, now, interval, trend, volume) {
+  return makeCandles(count, 100, interval, trend, volume).map(function (candle, index) {
+    return Object.assign({}, candle, { t: now - (count - index) * interval });
+  });
+}
+
 test("normalizes candles, removes duplicates and excludes open/future candles", function () {
   const now = 1700000000 + 4 * 300 + 250;
   const input = [
@@ -276,6 +282,82 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
     assert.match(pumpModel.why, /SHORT не підтверджено/);
   }
   assert.equal(pumpModel.quality, "INCOMPLETE");
+});
+
+test("strong rising pump remains active despite high RSI", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900,
+    function (index) { return index === 59 ? 4 : 0.05; },
+    function (index) { return index === 59 ? 200 : 10; });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.data.indicators.rsi >= 75);
+  assert.equal(model.stage.key, "active");
+  assert.match(model.stage.againstShort.join(" "), /високий RSI не переважає/);
+  assert.notEqual(model.state.key, "entry");
+});
+
+test("lower highs and fading volume from independent groups indicate possible distribution", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index === 55) return 12;
+    if (index >= 56 && index <= 58) return -2;
+    if (index === 59) return 3;
+    return 0.05;
+  }, function (index) {
+    if (index === 55) return 200;
+    if (index === 57 || index === 58) return 5;
+    if (index === 59) return 100;
+    return 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.stage.key, "distribution");
+  assert.match(model.stage.supportingShort.join(" "), /максимуми/);
+  assert.match(model.stage.supportingShort.join(" "), /обсяг/);
+  assert.equal(model.strategy.allowed, false);
+});
+
+test("closed support break with bearish hourly structure confirms reversal stage, not entry by itself", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
+    function (index) { return index === 59 ? 100 : 10; });
+  candles15[59] = Object.assign({}, candles15[59], {
+    o: "110", h: "110.5", l: "100", c: "101", v: "100"
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return -0.05; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return -0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 101 }, nowSeconds: now
+  });
+  assert.equal(model.stage.key, "reversal");
+  assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("нижче мінімумів"); }));
+  assert.notEqual(model.state.key, "entry");
+});
+
+test("insufficient candle history produces an unavailable stage instead of a directional assessment", function () {
+  const model = buildMarketData({
+    candles: { "5m": [], "15m": [], "1h": [], "4h": [] },
+    ticker: { quality: "NO DATA" }, nowSeconds: 1710000000
+  });
+  assert.equal(model.stage.key, "insufficient");
+  assert.equal(model.stage.continuationRisk, "неможливо оцінити");
+  assert.ok(model.stage.missing.length > 0);
 });
 
 test("lifecycle states distinguish calm, pump, overheating, exhaustion, setup, entry and unavailable data", function () {

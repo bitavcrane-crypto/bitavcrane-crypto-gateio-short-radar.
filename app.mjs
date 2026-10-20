@@ -231,6 +231,13 @@ function renderConfirmation(model) {
 function renderStrategyPanel(model) {
   const strategy = model.strategy;
   if (!strategy) return "";
+  const stage = model.stage || {
+    label: "Даних недостатньо",
+    supportingShort: [],
+    againstShort: [],
+    missing: ["оцінка стадії недоступна"],
+    continuationRisk: "неможливо оцінити"
+  };
   const matrix = ["15m", "1h", "4h"].map(function (interval) {
     const row = strategy.matrix[interval];
     return '<div class="strategy-matrix-row"><strong>' + interval + '</strong><span>' +
@@ -261,8 +268,15 @@ function renderStrategyPanel(model) {
     }).join(" / ") + " · Gross R/R 1 : " + formatNumber(strategy.riskReward, 2) +
     " · Net R/R 1 : " + formatNumber(strategy.netRiskReward, 2) + " (" + strategy.riskRewardBasis + ")" :
     "Entry/Stop/цілі не розраховані";
+  const evidence = function (items) { return items.length ? items.join(" · ") : "поки немає підтверджених ознак"; };
   return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
     escapeHtml(setup) + '</strong><span>' + escapeHtml(strategy.status) + "</span></div>" +
+    '<div class="market-stage"><strong>Стадія пампу: ' + escapeHtml(stage.label) +
+    '</strong><span>Ризик продовження: ' + escapeHtml(stage.continuationRisk) + '</span></div>' +
+    '<details class="stage-evidence"><summary>Підтвердження, суперечності та доступність даних</summary>' +
+    '<p><strong>На користь SHORT:</strong> ' + escapeHtml(evidence(stage.supportingShort)) + '</p>' +
+    '<p><strong>Проти SHORT:</strong> ' + escapeHtml(evidence(stage.againstShort)) + '</p>' +
+    '<p><strong>Не перевірено:</strong> ' + escapeHtml(evidence(stage.missing)) + '</p></details>' +
     '<div class="strategy-matrix">' + matrix + "</div><p><strong>SHORT SCORE " + strategy.score +
     "/100:</strong> " + escapeHtml(scoreReasons) +
     (optionalMissing.length ? " · Додаткові дані для score: " + escapeHtml(optionalMissing.join(" · ")) : "") +
@@ -988,6 +1002,14 @@ function markPairUnavailable(pair, message) {
       qualities: { "5m": "STALE", "15m": "STALE", "1h": "STALE", "4h": "STALE" }
     }),
     state: { key: "incomplete", label: "Дані недоступні", score: 0 },
+    stage: {
+      key: "insufficient",
+      label: "Даних недостатньо",
+      supportingShort: [],
+      againstShort: [],
+      missing: ["оновлення не вдалося; попередня оцінка застаріла"],
+      continuationRisk: "неможливо оцінити"
+    },
     quality: "STALE",
     confirmed: false,
     pumpScore: null,

@@ -359,6 +359,112 @@ function findBreakdown(candles) {
   return latest.close < support;
 }
 
+function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
+  const candles = data.candles15;
+  const indicators = data.indicators;
+  const missing = [];
+  if (!usableCandles || candles.length < 6) {
+    if (data.qualities["15m"] !== QUALITY.OK || candles.length < 6) {
+      missing.push("потрібна якісна історія закритих 15m свічок");
+    }
+    if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має конфлікт");
+    return {
+      key: "insufficient",
+      label: "Даних недостатньо",
+      supportingShort: [],
+      againstShort: [],
+      missing: missing,
+      continuationRisk: "неможливо оцінити"
+    };
+  }
+
+  const latest = candles[candles.length - 1];
+  const previousBlock = candles.slice(-6, -3);
+  const recentBlock = candles.slice(-3);
+  const previousHigh = Math.max.apply(null, previousBlock.map(function (candle) { return candle.high; }));
+  const recentHigh = Math.max.apply(null, recentBlock.map(function (candle) { return candle.high; }));
+  const atr = indicators.atr;
+  const lowerHigh = previousHigh > recentHigh &&
+    previousHigh - recentHigh >= Math.max(previousHigh * 0.002, finite(atr) ? atr * 0.15 : 0);
+  const supportBreak = findBreakdown(candles);
+  const failedHighBreak = strategy.setup && strategy.setup.type === "failed_high_break";
+  const structureWeak = lowerHigh || supportBreak || failedHighBreak;
+  const meanVolume = function (series) {
+    const values = series.map(function (candle) { return candle.volume; });
+    return values.every(finite) ? average(values) : null;
+  };
+  const priorVolume = meanVolume(previousBlock);
+  const recentVolume = meanVolume(recentBlock);
+  const volumeFading = finite(priorVolume) && priorVolume > 0 &&
+    finite(recentVolume) && recentVolume < priorVolume * 0.7 && recentHigh <= previousHigh;
+  const upperWick = recentBlock.some(function (candle) { return upperWickRatio(candle) >= 0.55; });
+  const bearishMomentum = Boolean(indicators.macd && indicators.macd.bearishCross && upperWick);
+  const momentumWeak = Boolean(indicators.obvDivergence || volumeFading || bearishMomentum);
+  const bearishOneHour = Boolean(strategy.flags && strategy.flags.bearish1h);
+  const reversalConfirmed = supportBreak && bearishOneHour;
+  const distributionPossible = structureWeak && momentumWeak;
+  const positivePrice = [data.changes["5m"], data.changes["15m"], data.changes["1h"]]
+    .some(function (change) { return finite(change) && change > 0; });
+  const activeUptrend = pump >= 45 && latest.close > latest.open && positivePrice &&
+    !structureWeak && !momentumWeak;
+  const decelerating = finite(data.changes["15m"]) && finite(data.changes["5m"]) &&
+    data.changes["15m"] > 0 && data.changes["5m"] < data.changes["15m"] * 0.35;
+  const exhaustionWatch = pump >= 45 && (structureWeak || momentumWeak || decelerating || upperWick ||
+    (finite(indicators.rsi) && indicators.rsi >= 75 && !activeUptrend) || exhaustion >= 45);
+
+  const supportingShort = [];
+  const againstShort = [];
+  if (supportBreak) supportingShort.push("закриття 15m нижче мінімумів попередніх трьох свічок");
+  if (lowerHigh) supportingShort.push("максимуми останніх трьох свічок нижчі за попередній локальний блок");
+  if (failedHighBreak) supportingShort.push("невдалий пробій локального максимуму");
+  if (indicators.obvDivergence) supportingShort.push("OBV не підтверджує локальний максимум ціни");
+  if (volumeFading) supportingShort.push("середній обсяг останніх трьох свічок слабший за попередній блок");
+  if (bearishMomentum) supportingShort.push("ведмежий перетин MACD разом із верхньою тінню");
+  if (latest.close > latest.open && positivePrice) {
+    againstShort.push("остання 15m свічка зростає та короткострокова зміна ціни позитивна");
+  }
+  if (finite(data.volumeRatio) && data.volumeRatio >= 1.5 && !structureWeak) {
+    againstShort.push("загальний обсяг підвищений, а структура підтримки не зламана");
+  }
+  if (finite(indicators.rsi) && indicators.rsi >= 75 && activeUptrend) {
+    againstShort.push("високий RSI не переважає чинний висхідний імпульс і сам не є сигналом SHORT");
+  }
+  if (!finite(data.volumeRatio)) missing.push("відносний обсяг (RVOL) недоступний");
+  if (!indicators.macd || !finite(indicators.rsi)) missing.push("RSI/MACD: недостатньо свічкової історії");
+  if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має неякісні дані");
+  if (data.stats.quality !== QUALITY.OK || !finite(data.oiChange15m)) {
+    missing.push("OI/деривативи недоступні або неякісні");
+  }
+  if (!finite(data.fundingNormalized)) missing.push("funding або його інтервал недоступний");
+
+  let key = "none";
+  let label = "Немає сетапу";
+  if (reversalConfirmed) {
+    key = "reversal";
+    label = "Розворот підтверджено";
+  } else if (distributionPossible) {
+    key = "distribution";
+    label = "Можливий розподіл";
+  } else if (activeUptrend) {
+    key = "active";
+    label = "Памп триває";
+  } else if (exhaustionWatch) {
+    key = "exhaustion";
+    label = "Увага: можливе виснаження";
+  }
+
+  return {
+    key: key,
+    label: label,
+    supportingShort: supportingShort,
+    againstShort: againstShort,
+    missing: missing,
+    continuationRisk: reversalConfirmed ? "нижчий після зламу структури; squeeze-ризик залишається" :
+      activeUptrend ? "підвищений: висхідна ціна й обсяг зберігаються" :
+        pump >= 45 ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
+  };
+}
+
 export function signalState(pump, exhaustion, breakdown, confirmed, hasData, shortReady) {
   if (!hasData) return { key: "incomplete", label: "Дані недоступні", score: 0 };
   if (shortReady && pump >= 45 && exhaustion >= 60 && breakdown && confirmed) return { key: "entry", label: "SHORT підтверджено", score: 80 };
@@ -471,6 +577,7 @@ export function buildMarketData(input) {
   } else if (strategy.setup) {
     state = { key: "setup", label: strategy.setupStatus + " · NO TRADE", score: 45 };
   }
+  const stage = classifyPumpStage(data, pump, exhaustion, strategy, usableCandles);
   const levels = strategy.setup && provisionalLevels && provisionalLevels.valid ?
     Object.assign({}, provisionalLevels, {
       riskReward: strategy.riskReward,
@@ -488,6 +595,7 @@ export function buildMarketData(input) {
     exhaustionScore: exhaustion,
     shortScore: shortScore,
     state: state,
+    stage: stage,
     breakdown: breakdown,
     confirmed: confirmed,
     levels: levels,
