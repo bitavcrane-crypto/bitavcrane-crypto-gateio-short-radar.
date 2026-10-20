@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { evaluateShortStrategy } from "../short-strategy.mjs";
-import { buildMarketData, transitionSignal, validatePairList } from "../core.mjs";
+import { buildMarketData, rankPumpCandidates, sortPairsBySignal, transitionSignal, validatePairList } from "../core.mjs";
 import { normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "../gate-api.mjs";
 import { buildOpenInterestSeries } from "../oi-visualization.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
@@ -218,7 +218,10 @@ test("partial API failures preserve other timeframes and missing contracts never
   const end = source.indexOf('\ndocument.getElementById("pair-form")', start);
   const errors = {};
   const globals = {
-    busy: false, pairs: pairs, contracts: [], models: models, pairErrors: {},
+    busy: false, pairs: pairs, manualPairs: pairs, automaticPairs: [], dismissedAutomaticPairs: new Set(),
+    MAX_AUTOMATIC_PAIRS: 12, MIN_AUTOMATIC_CHANGE_PERCENT: 5, MIN_AUTOMATIC_VOLUME_USDT: 250000,
+    rankPumpCandidates: rankPumpCandidates, sortPairsBySignal: sortPairsBySignal,
+    contracts: [], models: models, pairErrors: {},
     pairVersions: {}, statsRequests: {}, AbortController,
     lastSuccessfulUpdate: null, minimumRiskReward: 1.5, confirmationSettings: {},
     noticeNode: {}, connectionNode: {}, document: { getElementById: function () { return {}; } },
@@ -423,7 +426,11 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     function scanHarness(overrides = {}) {
       const now = Math.floor(Date.now() / 1000);
       const globals = {
-        busy: false, pairs: ["Q_USDT"], contracts: [], models: {}, pairErrors: {},
+        busy: false, pairs: ["Q_USDT"], manualPairs: ["Q_USDT"], automaticPairs: [],
+        dismissedAutomaticPairs: new Set(),
+        MAX_AUTOMATIC_PAIRS: 12, MIN_AUTOMATIC_CHANGE_PERCENT: 5, MIN_AUTOMATIC_VOLUME_USDT: 250000,
+        rankPumpCandidates: rankPumpCandidates, sortPairsBySignal: sortPairsBySignal,
+        contracts: [], models: {}, pairErrors: {},
         pairVersions: {}, statsRequests: {}, AbortController,
         lastSuccessfulUpdate: null, minimumRiskReward: 1.5, confirmationSettings: {},
         noticeNode: {}, connectionNode: {}, document: { getElementById: function () { return {}; } },
@@ -459,6 +466,46 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
         source.slice(start, end) + "\nscan;", globals);
       return { globals, scan };
     }
+
+    test("scan discovers active liquid pump candidates and runs them through strict SHORT gates", async function () {
+      const harness = scanHarness({
+        fetchContracts: async function () {
+          return ["Q_USDT", "PUMP_USDT"].map(function (name) {
+            return { name: name, status: "trading", funding_interval: 14400, quanto_multiplier: "1" };
+          });
+        },
+        fetchTickers: async function () {
+          return [
+            { contract: "Q_USDT", last: "100", funding_rate: "0", volume_24h_quote: "2000000" },
+            { contract: "PUMP_USDT", last: "3", funding_rate: "0", volume_24h_quote: "400000", change_percentage: "12" }
+          ];
+        }
+      });
+      await harness.scan();
+      assert.deepEqual(harness.globals.manualPairs, ["Q_USDT"]);
+      assert.deepEqual(harness.globals.automaticPairs, ["PUMP_USDT"]);
+      assert.deepEqual(harness.globals.pairs, ["Q_USDT", "PUMP_USDT"]);
+      assert.equal(harness.globals.models.PUMP_USDT.data.ticker.last, 3);
+      assert.equal(harness.globals.models.PUMP_USDT.confirmed, false);
+      assert.equal(harness.globals.models.PUMP_USDT.strategy.allowed, false);
+    });
+
+    test("automatic candidates keep active reversal scenarios under observation after ticker filter changes", async function () {
+      const harness = scanHarness({
+        pairs: ["Q_USDT", "PUMP_USDT"],
+        manualPairs: ["Q_USDT"],
+        automaticPairs: ["PUMP_USDT"],
+        models: { PUMP_USDT: { state: { key: "setup" } } },
+        fetchContracts: async function () {
+          return ["Q_USDT", "PUMP_USDT"].map(function (name) {
+            return { name: name, status: "trading", funding_interval: 14400, quanto_multiplier: "1" };
+          });
+        }
+      });
+      await harness.scan();
+      assert.deepEqual(harness.globals.automaticPairs, ["PUMP_USDT"]);
+      assert.deepEqual(harness.globals.pairs, ["Q_USDT", "PUMP_USDT"]);
+    });
 
     test("multiple scans expose missing OI on partial failures, recover, and mark retained data stale on global failure", async function () {
       const harness = scanHarness();
@@ -518,7 +565,8 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
   const stats = new AbortController();
   const globals = {
     document: { getElementById: function () { return {}; } }, signalSummaryNode: {}, eventList: {},
-    pairs: ["Q_USDT"], models: { Q_USDT: { state: { key: "none" } } }, events: [], pairErrors: {},
+    pairs: ["Q_USDT"], manualPairs: ["Q_USDT"], automaticPairs: [], dismissedAutomaticPairs: new Set(),
+    models: { Q_USDT: { state: { key: "none" } } }, events: [], pairErrors: {},
     pairVersions: {}, visualizationData: { Q_USDT: { "5m": { loading: true } } },
     visualizationRequests: { Q_USDT: { interval: "5m", controller: candles } },
     statsRequests: { Q_USDT: stats }, visualizationSelections: { Q_USDT: "15m" },

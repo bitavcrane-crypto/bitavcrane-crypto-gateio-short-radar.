@@ -1,4 +1,4 @@
-import { addPair, buildMarketData, normalizeCandles, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
+import { addPair, buildMarketData, normalizeCandles, rankPumpCandidates, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
 import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
@@ -12,6 +12,9 @@ import {
 
 const DEFAULT_PAIRS = ["BTC_USDT", "ETH_USDT", "SOL_USDT"];
 const PAIR_KEY = "gate-short-radar-pairs";
+const MAX_AUTOMATIC_PAIRS = 12;
+const MIN_AUTOMATIC_CHANGE_PERCENT = 5;
+const MIN_AUTOMATIC_VOLUME_USDT = 250000;
 const CONFIRMATION_KEY = "gate-short-radar-confirmation-settings";
 const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
 const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
@@ -31,7 +34,10 @@ const pairInput = document.getElementById("pair-input");
 let confirmationSettings = loadConfirmationSettings();
 let visualizationSettings = loadVisualizationSettings();
 let contracts = [];
-let pairs = loadPairs();
+let manualPairs = loadPairs();
+let automaticPairs = [];
+let dismissedAutomaticPairs = new Set();
+let pairs = manualPairs.slice();
 let models = {};
 let pairErrors = {};
 let events = [];
@@ -151,7 +157,7 @@ function loadMinimumRiskReward() {
 
 function savePairs() {
   try {
-    localStorage.setItem(PAIR_KEY, JSON.stringify(pairs));
+    localStorage.setItem(PAIR_KEY, JSON.stringify(manualPairs));
   } catch (error) {
     noticeNode.hidden = false;
     noticeNode.textContent = "Браузер не дозволяє зберегти список у localStorage.";
@@ -706,9 +712,11 @@ function bindSynchronizedCrosshair(panel, pair) {
 
 function renderCard(pair) {
   const model = models[pair];
+  const automaticLabel = automaticPairs.includes(pair) ?
+    '<span class="automatic-pair-label">АВТОСКАН · Gate.io</span>' : "";
   if (!model) {
     return '<article class="card"><div class="card-head"><div><h2 class="pair-name">' +
-      escapeHtml(pair) + '</h2><p class="price">Очікування першого оновлення</p></div>' +
+      escapeHtml(pair) + '</h2>' + automaticLabel + '<p class="price">Очікування першого оновлення</p></div>' +
       '<button class="remove-button" type="button" data-remove="' + escapeHtml(pair) + '" aria-label="Видалити ' +
       escapeHtml(pair) + '">✕</button></div><span class="state incomplete">Дані недоступні</span>' +
       '<p class="why"><strong>Чому?</strong> ' + escapeHtml(pairErrors[pair] ||
@@ -751,7 +759,7 @@ function renderCard(pair) {
   }
   if (!Number.isFinite(data.indicators.rsi) || !data.indicators.macd) qualityNotes.push("Історії свічок недостатньо для всіх індикаторів");
   return '<article class="card"><div class="card-head"><div><h2 class="pair-name">' + escapeHtml(pair) +
-    '</h2><p class="price">Остання ціна: ' + formatNumber(ticker.last, 8) +
+    '</h2>' + automaticLabel + '<p class="price">Остання ціна: ' + formatNumber(ticker.last, 8) +
     (ticker.mark !== null ? " · mark " + formatNumber(ticker.mark, 8) : "") +
     (ticker.index !== null ? " · index " + formatNumber(ticker.index, 8) : "") +
     '</p></div><button class="remove-button" type="button" data-remove="' + escapeHtml(pair) +
@@ -804,7 +812,9 @@ function renderCard(pair) {
 }
 
 function render() {
-  document.getElementById("pair-count").textContent = pairs.length + (pairs.length === 1 ? " пара" : " пар");
+  document.getElementById("pair-count").textContent =
+    pairs.length + (pairs.length === 1 ? " пара" : " пар") +
+    (automaticPairs.length ? " · автоскан: " + automaticPairs.length : " · автоскан активний");
   const activeShortCount = pairs.filter(function (pair) {
     return models[pair] && models[pair].state.key === "entry";
   }).length;
@@ -823,13 +833,19 @@ function render() {
   cardsNode.querySelectorAll("[data-remove]").forEach(function (button) {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-remove");
+      if (automaticPairs.includes(pair)) {
+        automaticPairs = removePair(automaticPairs, pair);
+      } else {
+        manualPairs = removePair(manualPairs, pair);
+      }
+      dismissedAutomaticPairs.add(pair);
+      pairs = manualPairs.concat(automaticPairs);
       pairVersions[pair] = (pairVersions[pair] || 0) + 1;
       cancelVisualizationRequest(pair);
       if (statsRequests[pair]) {
         statsRequests[pair].abort();
         delete statsRequests[pair];
       }
-      pairs = removePair(pairs, pair);
       delete models[pair];
       delete pairErrors[pair];
       visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
@@ -1104,6 +1120,56 @@ async function scan() {
     results[1].forEach(function (item) {
       if (item && typeof item.contract === "string") tickerMap.set(item.contract, item);
     });
+    const screenedCandidates = rankPumpCandidates(
+      results[1],
+      contracts.map(function (item) { return item.name; }),
+      contracts.length,
+      MIN_AUTOMATIC_CHANGE_PERCENT,
+      MIN_AUTOMATIC_VOLUME_USDT
+    );
+    const screenedNames = new Set(screenedCandidates.map(function (item) { return item.contract; }));
+    dismissedAutomaticPairs.forEach(function (pair) {
+      if (!screenedNames.has(pair)) dismissedAutomaticPairs.delete(pair);
+    });
+    const retainedPairs = automaticPairs.filter(function (pair) {
+      const model = models[pair];
+      return !manualPairs.includes(pair) && !dismissedAutomaticPairs.has(pair) &&
+        contractMap.has(pair) && model &&
+        (["watch", "pump", "hot", "exhaustion", "setup", "entry"].includes(model.state.key) ||
+          (model.state.key === "cancelled" && screenedNames.has(pair)));
+    });
+    const retained = sortPairsBySignal(retainedPairs, models).slice(0, MAX_AUTOMATIC_PAIRS);
+    const previousAutomaticPairs = automaticPairs.slice();
+    const selected = new Set(retained);
+    screenedCandidates.forEach(function (candidate) {
+      if (selected.size >= MAX_AUTOMATIC_PAIRS) return;
+      if (manualPairs.includes(candidate.contract) || dismissedAutomaticPairs.has(candidate.contract) ||
+          selected.has(candidate.contract)) return;
+      selected.add(candidate.contract);
+    });
+    automaticPairs = retained.concat(screenedCandidates
+      .filter(function (candidate) { return selected.has(candidate.contract) && !retained.includes(candidate.contract); })
+      .map(function (candidate) { return candidate.contract; }))
+      .slice(0, MAX_AUTOMATIC_PAIRS);
+    pairs = manualPairs.concat(automaticPairs);
+    previousAutomaticPairs.forEach(function (pair) {
+      if (pairs.includes(pair)) return;
+      pairVersions[pair] = (pairVersions[pair] || 0) + 1;
+      cancelVisualizationRequest(pair);
+      if (statsRequests[pair]) {
+        statsRequests[pair].abort();
+        delete statsRequests[pair];
+      }
+      delete models[pair];
+      delete pairErrors[pair];
+      delete visualizationData[pair];
+      delete visualizationCrosshairTimes[pair];
+      openVisualizations.delete(pair);
+      visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
+      openInterestSelections = removeVisualizationContract(openInterestSelections, pair);
+      saveVisualizationSelections();
+      saveOpenInterestSelections();
+    });
     const failures = [];
     await mapLimited(pairs.slice(), 3, async function (pair) {
       if (!pairs.includes(pair)) return;
@@ -1148,6 +1214,9 @@ async function scan() {
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);
+        else if (automaticPairs.includes(pair) && signal.pumpScore >= 45) {
+          notifyChange(pair, "new", signal.state.key, signal);
+        }
         models[pair] = Object.assign({}, signal, {
           indicatorConfirmation: evaluateShortConfirmation(signal.data.candles15, signal, confirmationSettings,
             Math.floor(Date.now() / 1000), prior && prior.indicatorConfirmation)
@@ -1191,13 +1260,17 @@ document.getElementById("pair-form").addEventListener("submit", function (event)
     noticeNode.textContent = "Список контрактів ще не завантажено. Повторіть спробу після підключення до Gate.io.";
     return;
   }
-  const result = addPair(pairs, pairInput.value, contracts.map(function (item) { return item.name; }));
+  const result = addPair(manualPairs, pairInput.value, contracts.map(function (item) { return item.name; }));
   if (result.error) {
     noticeNode.hidden = false;
     noticeNode.textContent = result.error;
     return;
   }
-  pairs = result.list;
+  const normalizedPair = pairInput.value.trim().toUpperCase();
+  manualPairs = result.list;
+  dismissedAutomaticPairs.delete(normalizedPair);
+  automaticPairs = removePair(automaticPairs, normalizedPair);
+  pairs = manualPairs.concat(automaticPairs);
   delete pairErrors[pairInput.value.trim().toUpperCase()];
   savePairs();
   pairInput.value = "";

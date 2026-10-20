@@ -1,10 +1,41 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  addPair, buildMarketData, calculateContractMetrics, calculateLevels, normalizeCandles, removePair,
+  addPair, buildMarketData, calculateContractMetrics, calculateLevels, normalizeCandles, rankPumpCandidates, removePair,
   signalState, sortPairsBySignal, transitionSignal, validatePairList
 } from "../core.mjs";
 import { normalizeContract, normalizeContractStats } from "../gate-api.mjs";
+
+test("automatic pump candidates require active USDT contracts with explicit gain and quote volume", function () {
+  const candidates = rankPumpCandidates([
+    { contract: "ALPHA_USDT", change_percentage: "8.1", volume_24h_quote: "500000" },
+    { contract: "BETA_USDT", change_percentage: "12", volume_24h_quote: "249999" },
+    { contract: "GAMMA_USDT", change_percentage: "4.99", volume_24h_quote: "900000" },
+    { contract: "DELTA_BTC", change_percentage: "30", volume_24h_quote: "9000000" },
+    { contract: "INACTIVE_USDT", change_percentage: "50", volume_24h_quote: "9000000" },
+    { contract: "MISSING_USDT", change_percentage: null, volume_24h_quote: "9000000" }
+  ], ["ALPHA_USDT", "BETA_USDT", "GAMMA_USDT"], 5, 5, 250000);
+  assert.deepEqual(candidates.map(function (item) { return item.contract; }), ["ALPHA_USDT"]);
+  assert.equal(candidates[0].changePercentage, 8.1);
+  assert.equal(candidates[0].volume24hQuote, 500000);
+});
+
+test("automatic pump candidate ranking respects its limit and omits missing metrics", function () {
+  const tickers = Array.from({ length: 5 }, function (_, index) {
+    return {
+      contract: "TOKEN" + index + "_USDT",
+      change_percentage: String(15 - index),
+      volume_24h_quote: String(1000000 + index)
+    };
+  });
+  const active = tickers.map(function (ticker) { return ticker.contract; });
+  assert.deepEqual(rankPumpCandidates(tickers, active, 2, 5, 250000).map(function (item) {
+    return item.contract;
+  }), ["TOKEN0_USDT", "TOKEN1_USDT"]);
+  assert.deepEqual(rankPumpCandidates([
+    { contract: "EMPTY_USDT", change_percentage: "10" }
+  ], ["EMPTY_USDT"], 5, 5, 250000), []);
+});
 
 function makeCandles(count, start, interval, trend, volume) {
   const rows = [];
