@@ -418,6 +418,16 @@ test("incomplete interval quality cannot confirm distribution or reversal", func
   assert.notEqual(model.stage.key, "distribution");
   assert.notEqual(model.stage.key, "reversal");
   assert.match(model.stage.missing.join(" "), /якість свічок 1h/);
+
+  const missingIntervalModel = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": [], "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(missingIntervalModel.pumpScore >= 45);
+  assert.equal(missingIntervalModel.data.qualities["1h"], "NO DATA");
+  assert.notEqual(missingIntervalModel.stage.key, "distribution");
+  assert.notEqual(missingIntervalModel.stage.key, "reversal");
+  assert.match(missingIntervalModel.stage.missing.join(" "), /якість свічок 1h/);
 });
 
 test("lower highs and fading volume from independent groups indicate possible distribution", function () {
