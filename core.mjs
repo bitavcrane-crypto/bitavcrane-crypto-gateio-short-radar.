@@ -359,16 +359,38 @@ function findBreakdown(candles) {
   return latest.close < support;
 }
 
-function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
+function hasHistoricalPump(candles) {
+  const baselineLength = 20;
+  const pumpWindowLength = 3;
+  const recentWindowLength = 3;
+  if (candles.length < baselineLength + pumpWindowLength + recentWindowLength) return null;
+  for (let end = candles.length - recentWindowLength - 1;
+    end >= baselineLength + pumpWindowLength - 1; end -= 1) {
+    const start = end - pumpWindowLength + 1;
+    const baseline = candles.slice(start - baselineLength, start).map(function (candle) {
+      return candle.volume;
+    });
+    const pumpWindow = candles.slice(start, end + 1);
+    if (!baseline.every(finite) || !pumpWindow.every(function (candle) { return finite(candle.volume); })) continue;
+    const baselineVolume = average(baseline);
+    const pumpVolume = average(pumpWindow.map(function (candle) { return candle.volume; }));
+    const priceChange = relativeChange(pumpWindow[pumpWindow.length - 1].close, pumpWindow[0].open);
+    if (baselineVolume > 0 && finite(priceChange) && priceChange >= 2 && pumpVolume / baselineVolume >= 1.5) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function classifyPumpStage(data, strategy, usableCandles) {
   const candles = data.candles15;
   const indicators = data.indicators;
   const missing = [];
-  // 45 is signalState's existing "Памп формується" threshold; lower scores do not confirm a pump.
-  const pumpStageThreshold = 45;
-  const volumeEvidence = finite(data.volumeRatio) ?
+  const hasUsableRvol = finite(data.volumeRatio) && data.volumeRatio >= 0;
+  const volumeEvidence = hasUsableRvol ?
     "RVOL " + data.volumeRatio.toFixed(2) + "× від середнього 20 попередніх закритих 15m свічок" :
     "RVOL недоступний";
-  if (!finite(data.volumeRatio)) missing.push("відносний обсяг (RVOL) недоступний");
+  if (!hasUsableRvol) missing.push("відносний обсяг (RVOL) недоступний");
   if (data.ticker.quality !== QUALITY.OK) missing.push("ticker недоступний або має неякісні дані");
   if (data.stats.quality !== QUALITY.OK || !finite(data.oiChange15m)) {
     missing.push("OI/деривативи недоступні або неякісні");
@@ -388,28 +410,15 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
       missing: missing,
       priceMomentum: "не оцінено через недостатню або неякісну історію",
       volumeEvidence: volumeEvidence,
-      continuationRisk: "неможливо оцінити"
+      continuationRisk: hasUsableRvol ? "неможливо оцінити: історія 15m недостатня або неякісна" :
+        "неможливо оцінити: RVOL недоступний"
     };
   }
 
-  const pumpEvidenceIntervals = ["5m", "15m", "1h", "4h"];
-  const pumpEvidenceQualityReady = pumpEvidenceIntervals.every(function (interval) {
-    return data.qualities[interval] === QUALITY.OK && finite(data.changes[interval]);
-  });
-  const pumpEvidenceReady = pumpEvidenceQualityReady && candles.length >= 21 && finite(data.volumeRatio);
-  if (!pumpEvidenceQualityReady) {
-    pumpEvidenceIntervals.forEach(function (interval) {
-      if (data.qualities[interval] !== QUALITY.OK) {
-        missing.push("якість свічок " + interval + ": " + data.qualities[interval] +
-          "; попередній памп для стадій «Можливий розподіл» і «Розворот підтверджено» не перевірений");
-      } else if (!finite(data.changes[interval])) {
-        missing.push("зміна ціни " + interval +
-          " недоступна для перевірки попереднього пампу, потрібного для стадій «Можливий розподіл» і «Розворот підтверджено»");
-      }
-    });
+  const confirmedPriorPump = hasHistoricalPump(candles) === true;
+  if (candles.length < 26) {
+    missing.push("потрібні щонайменше 26 закритих 15m свічок для перевірки історичного пампу");
   }
-  if (candles.length < 21) missing.push("потрібні щонайменше 21 закрита 15m свічка для підтвердження RVOL");
-  const confirmedPriorPump = pumpEvidenceReady && pump >= pumpStageThreshold;
 
   const latest = candles[candles.length - 1];
   const previousBlock = candles.slice(-6, -3);
@@ -433,19 +442,18 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const upperWick = recentBlock.some(function (candle) { return upperWickRatio(candle) >= 0.55; });
   const bearishMomentum = Boolean(indicators.macd && indicators.macd.bearishCross && upperWick);
   const momentumWeak = Boolean(indicators.obvDivergence || volumeFading || bearishMomentum);
-  const bearishOneHour = Boolean(strategy.flags && strategy.flags.bearish1h);
-  const reversalConfirmed = confirmedPriorPump && supportBreak && bearishOneHour;
+  const reversalConfirmed = confirmedPriorPump && supportBreak && latest.close < latest.open;
   const distributionPossible = confirmedPriorPump && structureWeak && momentumWeak;
-  const positivePrice = [data.changes["5m"], data.changes["15m"], data.changes["1h"]]
-    .some(function (change) { return finite(change) && change > 0; });
   const previous45mReturn = relativeChange(candles[candles.length - 4].close, candles[candles.length - 7].close);
   const recent45mReturn = relativeChange(candles[candles.length - 1].close, candles[candles.length - 4].close);
+  const positivePrice = finite(recent45mReturn) && recent45mReturn > 0;
   const decelerating = finite(previous45mReturn) && previous45mReturn > 0 &&
     finite(recent45mReturn) && recent45mReturn >= 0 && recent45mReturn < previous45mReturn * 0.75;
-  const activeUptrend = pump >= 45 && latest.close > latest.open && positivePrice &&
+  const activeUptrend = latest.close > latest.open && positivePrice &&
     !structureWeak && !momentumWeak && !decelerating;
-  const exhaustionWatch = pump >= 45 && (structureWeak || momentumWeak || decelerating || upperWick ||
-    (finite(indicators.rsi) && indicators.rsi >= 75 && !activeUptrend) || exhaustion >= 45);
+  const exhaustionWatch = (confirmedPriorPump || positivePrice) &&
+    (structureWeak || momentumWeak || decelerating || upperWick ||
+      (finite(indicators.rsi) && indicators.rsi >= 75 && !activeUptrend));
 
   const supportingShort = [];
   const againstShort = [];
@@ -461,7 +469,7 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   if (latest.close > latest.open && positivePrice) {
     againstShort.push("остання 15m свічка зростає та короткострокова зміна ціни позитивна");
   }
-  if (finite(data.volumeRatio) && data.volumeRatio >= 1.5 && !structureWeak) {
+  if (hasUsableRvol && data.volumeRatio >= 1.5 && !structureWeak) {
     againstShort.push("загальний обсяг підвищений, а структура підтримки не зламана");
   }
   if (finite(indicators.rsi) && indicators.rsi >= 75 && activeUptrend) {
@@ -474,7 +482,7 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
     finite(recent45mReturn) && recent45mReturn > 0 ?
       "позитивні " + recent45mReturn.toFixed(2) + "% за останні 45 хв; уповільнення не підтверджено" :
       "позитивне зростання за останні 45 хв не підтверджено";
-  const volumeContinuation = finite(data.volumeRatio) ?
+  const volumeContinuation = hasUsableRvol ?
     (data.volumeRatio >= 1.5 ? "RVOL підвищений: " : "RVOL не підвищений: ") + volumeEvidence :
     "обсяг не підтверджений: " + volumeEvidence;
 
@@ -502,10 +510,10 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
     missing: missing,
     priceMomentum: priceMomentum,
     volumeEvidence: volumeEvidence,
-    continuationRisk: !finite(data.volumeRatio) ? "неможливо оцінити: RVOL недоступний" :
+    continuationRisk: !hasUsableRvol ? "неможливо оцінити: RVOL недоступний" :
       reversalConfirmed ? "структура ціни зламана; squeeze-ризик залишається" :
         activeUptrend ? "підвищений через позитивний імпульс ціни; " + volumeContinuation :
-          pump >= 45 ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
+          confirmedPriorPump ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
   };
 }
 
@@ -621,7 +629,7 @@ export function buildMarketData(input) {
   } else if (strategy.setup) {
     state = { key: "setup", label: strategy.setupStatus + " · NO TRADE", score: 45 };
   }
-  const stage = classifyPumpStage(data, pump, exhaustion, strategy, usableCandles);
+  const stage = classifyPumpStage(data, strategy, usableCandles);
   const levels = strategy.setup && provisionalLevels && provisionalLevels.valid ?
     Object.assign({}, provisionalLevels, {
       riskReward: strategy.riskReward,
