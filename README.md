@@ -1,41 +1,107 @@
-# Gate.io speculative-pump and short radar
+# Gate.io Pump → SHORT Radar
 
-A dependency-free, read-only browser dashboard for monitoring Gate.io USDT perpetual contracts. The radar scans the available ticker list, analyzes closed 15-minute candles, and ranks possible short setups using price structure, volume, momentum, open interest, and funding where the exchange provides those values.
+Незалежний вебвіджет для спостереження за ф'ючерсами Gate.io. Він розділяє три різні питання: чи є памп, чи з'являються ознаки його виснаження та чи є підтвердження для SHORT. Це аналітичний інструмент, а не торговий бот і не гарантія прибутку. «Відносно безпечний SHORT» не означає безпечну або прибуткову угоду.
 
-## Run
+## Запуск
 
-Serve this directory with any static HTTP server, then open its address in a modern browser. For example:
+Відкрийте `index.html` у браузері або опублікуйте файли в корені GitHub Pages. Для браузерів, які блокують `file://`-запити, запустіть локальний статичний HTTP-сервер. Збірка, фреймворк і ключі API не потрібні. Дані завантажуються безпосередньо з публічного API Gate.io; доступ залежить від мережі, DNS і CORS браузера.
+
+Початковий список: `BTC_USDT`, `ETH_USDT`, `SOL_USDT`. Щоб додати контракт, введіть точний символ (наприклад, `RAVE_USDT`) і натисніть «Додати пару». Пара додається тільки якщо присутня серед активних контрактів USDT Gate.io. Кнопка ✕ видаляє пару. Список зберігається у `localStorage` цього браузера.
+
+## Дані та обмеження API
+
+Використовується офіційний [Gate API v4](https://www.gate.com/docs/developers/apiv4/en/) та чинні довідники Gate для [REST endpoints](https://github.com/gate/gateapi-python/blob/master/docs/FuturesApi.md) і [схеми `ContractStat` у Python SDK](https://github.com/gate/gateapi-python/blob/master/docs/ContractStat.md). Чинна схема документує `top_long_size` / `top_short_size` як відкритий інтерес топтрейдерів у контрактах; фактична наявність цих полів у live-відповіді не перевірена:
+
+| Endpoint | Поля / використання |
+| --- | --- |
+| `GET /api/v4/futures/usdt/contracts` | Список контрактів `name`, `status`; контрактні `funding_interval` (секунди), `funding_rate`, `funding_next_apply` |
+| `GET /api/v4/futures/usdt/tickers` | `contract`, `last`, `mark_price`, `index_price`, `funding_rate`, `volume_24h_quote` |
+| `GET /api/v4/futures/usdt/candlesticks?contract=…&interval=…&limit=80` | Свічки для основного радара; контракт USDT-M та інтервали `5m`, `15m`, `1h`, `4h` |
+| `GET /api/v4/futures/usdt/candlesticks?contract=…&interval=…&limit=600` | Історія для окремого графіка вибраної пари й таймфрейму; Gate описує параметри `contract`, `interval`, `limit` та максимум 2000 точок. Відповідь futures містить об'єкти з полями `t`, `o`, `h`, `l`, `c`, `v`, `sum` |
+| `GET /api/v4/futures/usdt/contract_stats?contract=…&interval=5m&limit=100` | Історичні `time`, `open_interest`, `open_interest_usd`, `top_long_size`, `top_short_size`, `lsr_account`, `lsr_taker`, `top_lsr_account`, `top_lsr_size`, документовані `long_liq_usd`/`short_liq_usd` та інші статистики контракту. Серії `top_long_size` / `top_short_size` показуються лише якщо відповідні поля присутні |
+| `GET /api/v4/futures/usdt/order_book?contract=…&limit=20&with_id=true` | Bid/ask, спред і глибина в межах 0,5%; USD-еквівалент за контрактним `quanto_multiplier` |
+
+У Gate API також задокументовані `GET /futures/usdt/funding_rate` з історичними `t`/`r` і `GET /futures/usdt/liq_orders` з `time`, `contract`, `size`, `order_size`, `order_price`, `fill_price`. Funding береться з ticker разом із контрактним інтервалом, а `liq_orders` не містить документованого поля напрямку ліквідації. У ticker також є 24h change/high/low; сигнал використовує власні закриті свічки, тому ці поля не використовуються у формулі.
+
+Свічки радара беруться лише з минулими часовими мітками та відкидаються, доки інтервал свічки не завершився. Окремий графік запитує потрібний контракт і вибраний інтервал без підміни даними іншого ринку; він упорядковує свічки за часом, прибирає повторні мітки та не розраховує індикатори на послідовності з пропусками. Історія та індикатори використовують лише завершені свічки; графік ціни додатково показує актуальний `last` із Gate futures ticker окремою лінією, не підміняючи ним історію. Відсутні або некоректні значення не замінюються нулями.
+
+Volume Ratio використовує `v` (обсяг у контрактах) із закритих 15m свічок і середній обсяг попередніх 20 свічок; ticker `volume_24h_quote` відображається окремо. OI береться з `contract_stats` (`open_interest` у контрактах і `open_interest_usd` у quote currency — USDT), а 15m/1h/4h зміни — з історичних статистичних записів. OI-графік має незалежний для кожної пари перемикач 5m/15m/1h/4h; 15m/1h/4h утворюються з 5m знімків як останнє значення в завершеному вікні лише за точної п'ятихвилинної послідовності та повноти відповідного поля, без інтерполяції пропусків. Якщо Gate повертає `top_long_size` і `top_short_size`, графік показує їхні значення окремо як `TOP LONG OI` (зелений) та `TOP SHORT OI` (червоний). Чинна схема Python SDK Gate документує ці поля як OI топтрейдерів у контрактах, а не розподіл усього ринкового `open_interest`; фактична наявність полів у live-відповіді не перевірена. Відсутність кожного поля позначається окремо як UNAVAILABLE/MISSING, зі своїм останнім фактичним 5m часом і STALE за потреби, навіть коли загальні stats мають якість OK. Час завершеної 4h точки не підміняє свіжість вихідних 5m знімків. Лінії не відновлюються з `open_interest` або співвідношень `lsr_account`, `lsr_taker`, `top_lsr_account`, `top_lsr_size`. Ліквідації LONG/SHORT беруться лише з документованих `long_liq_usd`/`short_liq_usd` останнього 5m запису (quote currency). Недокументовані `_new` поля ігноруються: їхні одиниці не підтверджені офіційною схемою. Неповні поля позначаються як такі, а не доповнюються нулями.
+
+OI-графік обмежено 100 останніми агрегованими точками, включно з пропусками: дуже старе джерело не створює необмежену кількість порожніх точок, але його фактичний останній час і STALE зберігаються. Послідовне зміщення всіх 5m знімків від UTC-сітки допускається; перевіряється крок 300 секунд, а фактичні часові мітки не округлюються до сітки.
+
+Funding враховується лише коли API повертає ставку й достовірний `funding_interval` у секундах. Ticker `funding_rate` — decimal ставка контрактного періоду, не готові відсотки/8h. Нормалізація виконується один раз: `raw × 28800 / funding_interval`. UI і стратегія використовують одне `data.funding.normalized` зі спільним часом отримання; UI також показує raw ставку й вихідний період. −0,0794% за 4h відповідає −0,1588%/8h; за 8h це залишається −0,0794%/8h. Отже, самі наведені значення не доводять помилку формули: без історичних відповідей неможливо встановити тодішній інтервал чи затримку. За невідомого періоду — UNKNOWN і DATA UNAVAILABLE, не припущення про 8h.
+
+Long/short ratio та ліквідації доступні через `contract_stats`, але їхні визначення обмежені документованими полями; віджет не виводить з них загальну кількість LONG/SHORT-позицій. Публічні `liq_orders` містять події ліквідації, але не документують напрямок сторони, тому для розділення LONG/SHORT використовуються лише агрегати `contract_stats`. Числовий ліміт запитів і гарантію CORS не підтверджено; частота 60 секунд і три паралельні пари — обережні налаштування, а не твердження про ліміт API. API може тимчасово бути недоступний або не дозволити запити з браузера — у цьому разі дані не вважаються нульовими, а віджет показує попередження.
+
+## Стани та оцінки
+
+- **WATCH / PUMP** — аномальний рух ціни; для високого PUMP score потрібне одночасне підтвердження зростання ціни та обсягу.
+- **OVERHEATED / EXHAUSTION** — перегрів, уповільнення momentum або інші незалежні ознаки виснаження. Самі по собі високий RSI чи funding SHORT не створюють.
+- **SETUP DETECTED** — знайдено можливу формацію; це ще не підтвердження сетапу чи входу.
+- **SETUP CONFIRMED** — конкретну формацію підтверджено закритою ціною, тиском продажів, обсягом і структурою 1h; обов’язкові фільтри виконання перевіряються окремо.
+- **SHORT ENTRY** — підтверджений пробій/невдалий ретест/хибний пробій максимуму та проходження всіх блокувальних перевірок: bearish 1h, продажі з обсягом, узгоджений Price × OI, відсутність сильного bullish 4h і squeeze-ризику, придатні глибина/спред, не розтягнутий рух і достатній Reward/Risk. Якщо критичні дані відсутні — `NO TRADE — DATA UNAVAILABLE`.
+- **SHORT скасовано** — ціна закрилася вище рівня інвалідації попереднього SHORT-сценарію.
+
+`PUMP`, `EXHAUSTION` і `SHORT` — окремі шкали 0–100, це прозорі евристичні бали, не статистично навчена модель. SHORT SCORE деталізує внесок структури (25), обсягу (15), Price × OI (15), RSI/MACD/OBV (15), funding/позиціонування (10), підтвердженого сетапу (10) та ліквідності (10), а також показує відсутні дані й блокування. Високий бал самостійно не дозволяє вхід. Матриця Price × OI рахується окремо за 15m/1h/4h на тих самих часових інтервалах; OI береться з історії `contract_stats`, не підмінюється обсягом.
+
+У режимі очікування всі пари зі списку залишаються видимими, а картки впорядковуються за близькістю до підтвердженого SHORT і балами сценарію. Статус і пояснення показують спокійний ринок, формування пампу, перегрів/виснаження, очікування пробою або підтверджений SHORT; окремо відображається повідомлення, якщо активних SHORT немає. При помилці оновлення картка позначає дані недоступними, не перетворює оцінки на нулі та зберігає час останнього повністю успішного оновлення.
+
+Індикатори обчислюються лише з історичних закритих свічок. RSI — 14 періодів; MACD — 12/26/9; ATR — 14. OBV-дивергенція позначається лише при новому локальному максимумі ціни без підтвердження максимуму OBV.
+
+## Entry, Stop, цілі та ризик
+
+Рівні наводяться лише для кандидатного сетапу й є приблизними. Entry — закриття останньої 15m свічки. Stop — максимум свічок конкретної локальної формації з буфером 0,2 ATR: для пробою — останні чотири свічки, для невдалого ретесту — свічка ретесту, для хибного пробою — від свічки sweep до останнього закриття. Старий максимум за 20 свічок не підставляється. Відстань Stop понад 3 ATR блокує сценарій, а не стискається штучно для поліпшення R/R. TP1/TP2/TP3 — три різні локальні підтримки з останніх 24 закритих 15m свічок нижче входу; pivot підтверджується сусідніми свічками. Без трьох підтримок — NO TRADE, без вигаданих ATR-цілей. Потрібно Stop > Entry > TP1 > TP2 > TP3 > 0. Невалідні рівні приховані, але причина відмови збережена у блокуваннях. Gross Reward/Risk до TP1 перераховується після всіх рівнів як (Entry − TP1)/(Stop − Entry), без довіри до готового значення. Мінімальний Reward/Risk — 1,5 за замовчуванням і налаштовується. Коли доступний контрактний `taker_fee_rate`, також перевіряється оцінка Net R/R: з reward віднімається `(Entry + TP1) × (fee + slippage/100)`, до risk додається `(Entry + Stop) × (fee + slippage/100)`. Це консервативна двостороння оцінка з поточним slippage, не фактична комісія акаунту чи прогноз майбутньої книги. За невідомої комісії показується лише gross, net недоступний. Для входу spread має бути не вище 0,2%, slippage оцінений для тестового $1 000 ордера — не вище 0,15%, 24h quote volume — не менше $1 млн, а мінімальна глибина обох сторін книги в межах 0,5% від midpoint — $10 000. Глибина кожної сторони = сума `price × contracts × quanto_multiplier`; береться мінімум bid/ask, slippage — гірший із двох VWAP для $1000 за best price. Spread = `(ask/bid − 1) × 100`. Ті самі перевірки визначають внесок ліквідності у score; непридатні значення показуються з порогами. Це евристики виконуваності та локальності стопа, не оптимізовані backtest і не гарантія виконання.
+
+Причини DATA UNAVAILABLE мають єдиний список `strategy.missing`, який визначає `dataReady` і відображається окремо від короткого списку блокувань. NaN/Infinity, пропущені OI 4h, ліквідації LONG/SHORT та ненадійна якість не підміняються нулями. Funding squeeze блокує лише при нормалізованій ставці ≤ −0,1% за 8h **і** L/S account < 0,8; окреме правило ліквідацій — SHORT > 0 USD та SHORT > 3 × LONG USD за останні 5m. Пояснення називає саме спрацьоване правило й значення. Наприклад, −0,0846% за 8h та L/S 0,713 самі не активують funding-правило; при іншому інтервалі спочатку виконується нормалізація.
+
+`strategy.readiness` містить той самий список і окремий стан 15m/1h/4h; optional RSI/MACD/OBV/KDJ не стають обов’язковими OI-полями. Межі Price × OI: ±0,1% включно — flat; max(|Δprice|, |ΔOI|) ≥ 3% — «різкі», < 0,5% — «слабкі». Окремий liquidation-flush gate потребує одночасно Δprice ≤ −2% і ΔOI ≤ −2% та невдалого ретесту, не автоматичного SHORT.
+
+## Якість та оновлення
+
+Для показників використовуються стани `OK`, `NO DATA`, `STALE`, `CONFLICT`, `INCOMPLETE`, `SUSPECT`. Віджет і live-ціна графіка оновлюються приблизно раз на 60 секунд через `GET /api/v4/futures/usdt/tickers`; графік показує `last` лише для ticker зі станом `OK`. Під час помилки API ціна не позначається як актуальна, а повідомлення про помилку залишається видимим. Віджет обмежує одночасні пари трьома та кешує повторні запити. Сповіщення створюються лише при зміні стану; за дозволу браузера додатково показується системне сповіщення. Сигнали використовують тільки закриті 15m свічки; відкриті та майбутні свічки відкидаються.
+
+Свічка `t` використовується після `t + interval ≤ now`; якщо наступний очікуваний закритий інтервал відсутній, історія вже STALE. Stats старше 600s, ticker старше 120s і книга старше 30s не дозволяють вхід. Для книги перевіряється також `current` (час генерації відповіді), а не `update`: давно незмінна книга може бути свіжою. Невідомий `current` — INCOMPLETE. Ticker не має документованого часу генерації, тому доступна лише перевірка часу отримання, не гарантія свіжості upstream. Запити обмежені 15s; HTTP 429/помилки не стають нулями. Невдача одного timeframe не стирає решту відповідей; відсутність контракту в частковій відповіді не видаляє збережену пару. Оновлення виконуваності в межах тієї самої свічки переоцінює gates і створює подію лише за зміни стану.
+
+## Підтверджені дефекти та регресії аудиту
+
+Перевірено офіційні Gate SDK схеми [Contract](https://github.com/gate/gateapi-python/blob/master/docs/Contract.md), [FuturesTicker](https://github.com/gate/gateapi-python/blob/master/docs/FuturesTicker.md), [ContractStat](https://github.com/gate/gateapi-python/blob/master/docs/ContractStat.md), [FuturesCandlestick](https://github.com/gate/gateapi-python/blob/master/docs/FuturesCandlestick.md), [FuturesOrderBook](https://github.com/gate/gateapi-python/blob/master/docs/FuturesOrderBook.md) і [FuturesApi](https://github.com/gate/gateapi-python/blob/master/docs/FuturesApi.md). Live API у середовищі аудиту недоступний через DNS; історичні Q_USDT відповіді не відновлювалися.
+
+| Джерело / причина | Відтворення та наслідок | Виправлення / детермінована регресія |
+| --- | --- | --- |
+| `gate-api.numeric`, `core.number`: неявний `Number()` | `true` → ціна 1, `false` → «виміряна» ліквідація 0 | Лише числа/непорожні числові рядки; тести malformed scalar types/numeric parsing |
+| `core.normalizeCandles`: допуск трьох пропущених інтервалів | Остання 15m свічка відсутня, але quality OK | STALE вже за одного відсутнього закриття; тест freshness boundary |
+| `core.calculateContractMetrics`: незалежні зміщення OI endpoints | 602s зміна видавалася за 15m; missing endpoint запозичався з попереднього | Однакові offsets, точна тривалість і жодного обходу null; OI endpoint regressions |
+| `gate-api.normalizeOrderBook`: лише час отримання | Годинний `current` із новим receipt виглядав свіжим | Перевірка `current`, timestamp/side/window/notional metadata; book freshness tests |
+| `gate-api.normalizeContractStats`: недокументовані `_new` aliases | Неперевірені значення підміняли задокументовані quote-агрегати | Лише офіційні directional fields; documented aggregates/unknown aliases tests |
+| `short-strategy.requiredData`: довіра до quality без часу | Timestamp-less/відкрита свічка або старі stats могли дозволити entry | Перевірка закриття, continuity, freshness, per-timeframe readiness; direct strategy bypass tests |
+| `short-strategy.evaluateShortStrategy`: optional provenance/ATR | Без metadata можна було підставити сторонній Entry/Stop | Обов’язкові ATR, локальна інвалідація/sourceTime і Entry = latest closed close; level provenance tests |
+| `core.calculateLevels`: ATR TP2/TP3 без структури | Цілі виглядали як підтверджені рівні | Три різні підтверджені supports або NO TRADE; structural target tests |
+| `core.transitionSignal`, `app.markPairUnavailable` | Cancellation/API error лишали `confirmed=true`, статус strategy міг лишатися ENTRY | Синхронне скидання confirmed/status/readiness; cancellation/failed refresh tests |
+| `app.scan`, `notifyChange` | Один failed request стирав інші TF; same-candle recovery не сповіщалася; partial contracts видаляли пари | allSettled, збереження пар, alert hard gates і state-change dedup; partial API/alert tests |
+| `app.renderCard`: різні funding bases | Raw −0,0794% і normalized −0,1588%/8h виглядали суперечливими | Спільна funding metadata, raw + normalized + час; Q_USDT UI/normalization tests |
+
+Пороги squeeze/liquidity/мінімального R/R не послаблено. Повний тест проходить API normalization → closed candles/OI → strategy → levels → entry та окремо блокує той самий сетап через depth. Q_USDT наведені числа перевіряються як реконструйований сценарій, не як запис live-ринку.
+
+## Додаткове підтвердження SHORT
+
+RCI, OBV, EMA та KDJ працюють окремо від основного алгоритму. Вони не змінюють пошук пампу, бали, базовий SHORT SETUP/ENTRY, пороги або сортування. Наявні налаштування додаткового підтвердження збереглися. Для графіків RCI(6/12/24) і EMA(200/55/22) мають власні глобальні періоди; OBV SMA/зміна(10) та KDJ(9/3/3: довжина/MA1/MA2) використовують поточні значення однойменних налаштувань у панелі додаткового підтвердження. Кнопки ввімкнення індикаторів керують додатковим підтвердженням, а не приховують графіки. Для кожного контракту окремо зберігається вибраний інтервал 5m/15m/1h/4h (початково 15m); розкриття, вибір інтервалу та кеш даних використовують символ контракту, а не позицію картки. Графіки отримують до 600 свічок (достатньо для підтримуваного максимуму EMA 500) лише при першому відкритті або після застарівання кешу; кеш розділений за контрактом та інтервалом. Періоди графіків і вибір таймфрейму зберігаються в `localStorage`.
+
+RCI має шкалу −100…+100 і зони ±80. OBV розраховується за напрямком close та обсягом контрактів; показані абсолютна лінія, SMA й зміна за налаштоване вікно, але абсолютний OBV не використовується як самостійний SHORT-сигнал. EMA починаються із середнього перших N закриттів, далі використовують множник 2/(N+1); періоди прив'язані до свічок вибраного таймфрейму. KDJ: RSV = (close − lowest(low, length)) / (highest(high, length) − lowest(low, length)) × 100 (RSV=50 при нульовому діапазоні), K = проста MA(RSV, MA1), D = проста MA(K, MA2), J = 3K − 2D. Відсутність мінімально потрібної історії показується окремо; при API-помилці відображається попередній успішний час оновлення, якщо він є. RCI-дивергенція не оголошується, оскільки цей модуль не має надійного алгоритму її визначення. Сильний висхідний тренд старшого таймфрейму має відображатися як ризик контртренду, не як гарантія або безпечний вхід.
+
+Кнопка «Візуалізація» під кожною парою також показує закриті 15m Price/Volume графіки, доступну історію OI, матрицю Price × OI 15m/1h/4h, SHORT SCORE з аргументами, Entry/Stop/цілі, R/R, блокувальні причини та час останнього оновлення.
+
+Радар запитує останні 100 п'ятихвилинних stats-знімків, щоб охопити обидві межі останнього закритого 4h інтервалу навіть перед наступним 4h закриттям. Це розмір запиту, а не гарантія повноти відповіді API або наявності `top_long_size` / `top_short_size`: для кожної межі потрібен знімок не старший за один 5m крок; відсутня історія блокує повне підтвердження. Окремий OI-графік вимагає повних UTC-вікон: 100 знімків 5m часто дають лише одну завершену 4h точку, а для лінії потрібні дві. У цьому разі показано недостатність 4h історії та кількість завершених точок окремо від свіжості джерела; часткові вікна не доповнюються. Більший stats-ліміт і історичне дозавантаження не використовуються без перевірки їхньої сумісності з live API. Перемикач OI сам не викликає запитів; нових таймерів немає. Історична книга заявок недоступна. Тому повноцінний backtest із історичним depth, комісією та фактичним прослизанням не запускався і не замінювався синтетичними результатами. Регресія Q_USDT перевіряє надані рівні й окремо реконструйовані свічкові структури, а не заявляє відновлення реальних історичних свічок Q_USDT. Симуляція лише за свічками не підтвердила б обов'язкові умови виконуваності; статистики win rate/expectancy/profit factor/max drawdown тут не заявляються.
+
+Пояснення розрізняє перегрів без підтвердженого розвороту, виснаження, очікування підтвердження ціною, узгоджене підтвердження індикаторами та суперечливі сигнали. Перекупленість сама по собі не є умовою SHORT-входу. Для позначки індикаторного підтвердження потрібен чинний базовий SHORT ENTRY і достатня узгодженість доступних налаштованих індикаторів. Відсутня історія, пропущені обсяги або некоректні налаштування позначаються окремо; вони не підміняються нейтральними/нульовими значеннями й не змінюють базовий сигнал. Зміна параметра переобчислює цей індикатор і загальну оцінку, повторно використовуючи результати інших індикаторів для тієї ж закритої свічки.
+
+Якість підтвердження — евристична оцінка, а не ймовірність прибутку; ризик сценарію залишається. Нові індикатори не пройшли історичну перевірку чи оптимізацію на відкладених даних.
+
+## Тести
+
+Потрібен Node.js із вбудованим test runner:
 
 ```sh
-python3 -m http.server 8000
+node --test
 ```
 
-Open `http://localhost:8000`. A local server is needed because browsers generally do not load JavaScript modules from `file://` URLs. The dashboard makes read-only public requests to `https://fx-api.gateio.ws/api/v4`; API availability and browser CORS support depend on Gate.io and your network.
-
-## What the radar does
-
-- Loads Gate.io USDT futures tickers and scans active contracts in rotation for closed 15-minute candles. Candles are requested with bounded concurrency; a refresh can take time for a large market list.
-- Uses 15-minute candles as its primary timeframe and completed 5-minute candles as an additional confirmation when available. 1-hour and 4-hour changes are calculated from the 15-minute candle history.
-- Requests 5-minute confirmation and open-interest history for up to 20 highest-ranked pumped/watchlist contracts per scan cycle. Other contracts show these supplemental metrics as not requested or unavailable.
-- Shows the pump move, relative volume, MACD momentum, OBV confirmation, upper-wick rejection, local support, funding, and open-interest change when that data is returned.
-- Separates overheated/weakening setups from a reversal watch and a short candidate. A candidate requires a closed-candle support break plus a bearish close; heat alone does not qualify.
-- Displays the support-break trigger and recent-high invalidation, a transparent 0–100 score, reasons, and outstanding confirmation.
-- Supports custom contract watchlist entries, score sorting, periodic refresh, and browser notifications for stage changes.
-
-## Data and limitations
-
-Data comes from Gate.io's public API v4 endpoints:
-
-- `GET /futures/usdt/tickers`
-- `GET /futures/usdt/candlesticks`
-- `GET /futures/usdt/contract_stats` (open-interest history, when returned)
-
-Funding is read from each ticker response when available. The dashboard labels each source and fetch time; unavailable values are shown as unavailable rather than inferred. Volume anomaly is the last completed 15-minute candle's volume compared with the previous 20 completed candles. Technical signals and scores are screening heuristics, not predictions or trading instructions. API delays, missing history, and exchange-side changes can affect results. No order placement, guaranteed reversal, or guaranteed-safe short is provided.
-
-## Checks
-
-Run the focused core tests with Node.js:
-
-```sh
-node --test radar.test.mjs
-```
+Тести перевіряють якість і нормалізацію даних, закриті свічки/no-lookahead, stats/funding, індикатори та сигнали, ізоляцію додаткового підтвердження, інвалідацію SHORT і керування списком пар. Результати моделі не є інвестиційною порадою; ф'ючерсна торгівля має високий ризик.
