@@ -57,6 +57,12 @@ function makeCandles(count, start, interval, trend, volume) {
   return rows;
 }
 
+function makeTimedCandles(count, now, interval, trend, volume) {
+  return makeCandles(count, 100, interval, trend, volume).map(function (candle, index) {
+    return Object.assign({}, candle, { t: now - (count - index) * interval });
+  });
+}
+
 test("normalizes candles, removes duplicates and excludes open/future candles", function () {
   const now = 1700000000 + 4 * 300 + 250;
   const input = [
@@ -309,6 +315,305 @@ test("normal market and pump without exhaustion do not produce SHORT", function 
   assert.equal(pumpModel.quality, "INCOMPLETE");
 });
 
+test("strong rising pump remains active despite high RSI", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900,
+    function (index) { return index === 59 ? 4 : 0.05; },
+    function (index) { return index === 59 ? 200 : 10; });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.data.indicators.rsi >= 75);
+  assert.equal(model.stage.key, "active");
+  assert.match(model.stage.againstShort.join(" "), /високий RSI не переважає/);
+  assert.match(model.stage.priceMomentum, /уповільнення не підтверджено/);
+  assert.match(model.stage.volumeEvidence, /RVOL .*від середнього 20/);
+  assert.notEqual(model.state.key, "entry");
+  assert.equal(model.strategy.allowed, false);
+});
+
+test("active pump stays active with incomplete 1h data and explains the limited confirmation", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900,
+    function (index) { return index === 59 ? 4 : 0.05; },
+    function (index) { return index === 59 ? 200 : 10; });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  candles1h.splice(30, 1);
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.data.qualities["1h"], "INCOMPLETE");
+  assert.equal(model.stage.key, "active");
+  assert.match(model.stage.missing.join(" "), /1h: INCOMPLETE.*попередній памп.*«Можливий розподіл».*«Розворот підтверджено»/);
+  assert.doesNotMatch(model.stage.missing.join(" "), /якість свічок 1h не підтверджує памп-стадію/);
+});
+
+test("genuine price deceleration compares equal 45-minute windows from closed 15m candles", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index >= 54 && index <= 56) return 5;
+    if (index === 59) return 3.2;
+    if (index >= 57) return 1;
+    return 0.05;
+  }, function (index) { return index === 59 ? 200 : 10; });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 1 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.stage.key, "exhaustion");
+  assert.match(model.stage.priceMomentum, /останні 45 хв.*попередні 45 хв/);
+  assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("сповільнився"); }));
+  assert.notEqual(model.strategy.allowed, true);
+});
+
+test("missing volume remains unavailable and is not described as elevated or holding", function () {
+  const now = 1710000000;
+  const noVolume = function (candles) {
+    return candles.map(function (candle) {
+      const result = Object.assign({}, candle);
+      delete result.v;
+      return result;
+    });
+  };
+  const model = buildMarketData({
+    candles: {
+      "5m": noVolume(makeTimedCandles(60, now, 300, function () { return 0.1; }, function () { return 10; })),
+      "15m": noVolume(makeTimedCandles(60, now, 900,
+        function (index) { return index === 59 ? 3 : 0.1; }, function () { return 10; })),
+      "1h": makeTimedCandles(60, now, 3600, function () { return 0.1; }, function () { return 10; }),
+      "4h": makeTimedCandles(60, now, 14400, function () { return 0.1; }, function () { return 10; })
+    },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.equal(model.data.volumeRatio, null);
+  assert.ok(model.data.changes["15m"] >= 2);
+  assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
+  assert.match(model.stage.missing.join(" "), /RVOL.*недоступний/);
+  assert.match(model.stage.continuationRisk, /неможливо оцінити.*RVOL недоступний/);
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
+  assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);
+});
+
+test("weak price structure and momentum with pumpScore zero do not indicate distribution or reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    return index >= 57 ? -0.1 : 0.01;
+  }, function (index) {
+    return index === 55 ? 200 : index >= 57 ? 5 : 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: Number(candles15[candles15.length - 1].c) }, nowSeconds: now
+  });
+  assert.equal(model.pumpScore, 0);
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
+});
+
+test("pumpScore 35 with a closed support break and bearish 1h does not confirm pump reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
+    function (index) { return index === 59 ? 100 : 10; });
+  candles15[59] = Object.assign({}, candles15[59], {
+    o: "110", h: "110.5", l: "100", c: "101", v: "100"
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return -0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 101 }, nowSeconds: now
+  });
+  assert.equal(model.pumpScore, 35);
+  assert.equal(model.strategy.flags.bearish1h, true);
+  assert.notEqual(model.stage.key, "reversal");
+});
+
+test("incomplete interval quality cannot confirm distribution or reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index === 55) return 12;
+    if (index >= 56 && index <= 58) return -2;
+    if (index === 59) return 3;
+    return 0.05;
+  }, function (index) {
+    if (index === 55) return 200;
+    if (index === 57 || index === 58) return 5;
+    if (index === 59) return 100;
+    return 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  candles1h.splice(30, 1);
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.data.qualities["1h"], "INCOMPLETE");
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
+  assert.match(model.stage.missing.join(" "), /якість свічок 1h/);
+
+  const missingIntervalModel = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": [], "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(missingIntervalModel.pumpScore >= 45);
+  assert.equal(missingIntervalModel.data.qualities["1h"], "NO DATA");
+  assert.notEqual(missingIntervalModel.stage.key, "distribution");
+  assert.notEqual(missingIntervalModel.stage.key, "reversal");
+  assert.match(missingIntervalModel.stage.missing.join(" "), /якість свічок 1h/);
+});
+
+test("incomplete 4h data blocks otherwise supported distribution and reversal labels", function () {
+  const now = 1710000000;
+  const distribution15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index === 55) return 12;
+    if (index >= 56 && index <= 58) return -2;
+    if (index === 59) return 3;
+    return 0.05;
+  }, function (index) {
+    if (index === 55) return 200;
+    if (index === 57 || index === 58) return 5;
+    if (index === 59) return 100;
+    return 10;
+  });
+  const distribution5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const distribution1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const distribution4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  distribution4h.splice(30, 1);
+  const distribution = buildMarketData({
+    candles: { "5m": distribution5, "15m": distribution15, "1h": distribution1h, "4h": distribution4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(distribution.pumpScore >= 45);
+  assert.equal(distribution.data.qualities["4h"], "INCOMPLETE");
+  assert.notEqual(distribution.stage.key, "distribution");
+  assert.match(distribution.stage.missing.join(" "), /4h: INCOMPLETE.*попередній памп/);
+
+  const reversal15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
+    function (index) { return index === 59 ? 100 : 10; });
+  reversal15[59] = Object.assign({}, reversal15[59], {
+    o: "110", h: "110.5", l: "100", c: "101", v: "100"
+  });
+  const reversal5 = makeTimedCandles(60, now, 300, function () { return 0.05; }, function () { return 10; });
+  const previous5mClose = Number(reversal5[58].c);
+  reversal5[59] = Object.assign({}, reversal5[59], {
+    o: String(previous5mClose), h: String(previous5mClose * 1.018),
+    l: String(previous5mClose * 0.996), c: String(previous5mClose * 1.012)
+  });
+  const reversal1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
+  const reversal4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const previous4hClose = Number(reversal4h[58].c);
+  reversal4h[59] = Object.assign({}, reversal4h[59], {
+    o: String(previous4hClose), h: String(previous4hClose * 1.125),
+    l: String(previous4hClose * 0.996), c: String(previous4hClose * 1.12)
+  });
+  reversal4h.splice(30, 1);
+  const reversal = buildMarketData({
+    candles: { "5m": reversal5, "15m": reversal15, "1h": reversal1h, "4h": reversal4h },
+    ticker: { quality: "OK", last: 101 }, nowSeconds: now
+  });
+  assert.ok(reversal.pumpScore >= 45);
+  assert.equal(reversal.data.qualities["4h"], "INCOMPLETE");
+  assert.equal(reversal.strategy.flags.bearish1h, true);
+  assert.notEqual(reversal.stage.key, "reversal");
+  assert.match(reversal.stage.missing.join(" "), /4h: INCOMPLETE.*попередній памп/);
+});
+
+test("lower highs and fading volume from independent groups indicate possible distribution", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index === 55) return 12;
+    if (index >= 56 && index <= 58) return -2;
+    if (index === 59) return 3;
+    return 0.05;
+  }, function (index) {
+    if (index === 55) return 200;
+    if (index === 57 || index === 58) return 5;
+    if (index === 59) return 100;
+    return 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.stage.key, "distribution");
+  assert.match(model.stage.supportingShort.join(" "), /максимуми/);
+  assert.match(model.stage.supportingShort.join(" "), /обсяг/);
+  assert.equal(model.strategy.allowed, false);
+});
+
+test("closed support break with bearish hourly structure confirms reversal stage, not entry by itself", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
+    function (index) { return index === 59 ? 100 : 10; });
+  candles15[59] = Object.assign({}, candles15[59], {
+    o: "110", h: "110.5", l: "100", c: "101", v: "100"
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0.05; }, function () { return 10; });
+  const previous5mClose = Number(candles5[58].c);
+  candles5[59] = Object.assign({}, candles5[59], {
+    o: String(previous5mClose), h: String(previous5mClose * 1.018),
+    l: String(previous5mClose * 0.996), c: String(previous5mClose * 1.012)
+  });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const previous4hClose = Number(candles4h[58].c);
+  candles4h[59] = Object.assign({}, candles4h[59], {
+    o: String(previous4hClose), h: String(previous4hClose * 1.125),
+    l: String(previous4hClose * 0.996), c: String(previous4hClose * 1.12)
+  });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 101 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.stage.key, "reversal");
+  assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("нижче мінімумів"); }));
+  assert.notEqual(model.state.key, "entry");
+  assert.equal(model.strategy.allowed, false);
+});
+
+test("insufficient candle history produces an unavailable stage instead of a directional assessment", function () {
+  const model = buildMarketData({
+    candles: { "5m": [], "15m": [], "1h": [], "4h": [] },
+    ticker: { quality: "NO DATA" }, nowSeconds: 1710000000
+  });
+  assert.equal(model.stage.key, "insufficient");
+  assert.equal(model.stage.continuationRisk, "неможливо оцінити");
+  assert.ok(model.stage.missing.length > 0);
+  assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
+});
+
 test("lifecycle states distinguish calm, pump, overheating, exhaustion, setup, entry and unavailable data", function () {
   assert.deepEqual(signalState(0, 0, false, false, false, false), {
     key: "incomplete", label: "Дані недоступні", score: 0
@@ -548,6 +853,14 @@ test("complete closed-candle and stats pipeline permits entry only after every m
   assert.equal(model.strategy.allowed, true);
   assert.equal(model.confirmed, true);
   assert.equal(model.state.key, "entry");
+  assert.equal(model.pumpScore, 23);
+  assert.equal(model.exhaustionScore, 0);
+  assert.equal(model.shortScore, 81);
+  assert.equal(model.strategy.status, "SHORT ENTRY");
+  assert.deepEqual(
+    [model.levels.entry, model.levels.stop, model.levels.tp1, model.levels.tp2, model.levels.tp3],
+    [97.3, 100.69, 91.3, 88.3, 85.3]
+  );
   assert.ok(model.strategy.netRiskReward >= 1.5);
   input.orderBook.depthUsd = 9999;
   const blocked = buildMarketData(input);

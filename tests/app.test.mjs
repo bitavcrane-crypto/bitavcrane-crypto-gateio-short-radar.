@@ -58,6 +58,45 @@ test("detected failed-high formation is not labelled a confirmed entry and repea
   assert.equal((source.match(/renderStrategyPanel\(model\)/g) || []).length, 2);
 });
 
+test("market-stage evidence is displayed inside the existing strategy panel", function () {
+  const value = model();
+  value.stage = {
+    label: "Можлива дистрибуція",
+    supportingShort: ["нижчі максимуми"],
+    againstShort: ["ціна зростає"],
+    missing: ["OI недоступний"],
+    priceMomentum: "зростання ціни за 45 хв",
+    volumeEvidence: "RVOL недоступний",
+    continuationRisk: "підвищений"
+  };
+  const html = renderPanel(value);
+  assert.match(html, /Стадія пампу: Можлива дистрибуція/);
+  assert.match(html, /Динаміка ціни:<\/strong> зростання ціни за 45 хв/);
+  assert.match(html, /Обсяг:<\/strong> RVOL недоступний/);
+  assert.match(html, /нижчі максимуми/);
+  assert.match(html, /ціна зростає/);
+  assert.match(html, /OI недоступний/);
+  assert.match(html, /Ризик продовження: підвищений/);
+});
+
+test("stage evidence explains incomplete interval quality without contradicting an active pump", function () {
+  const value = model();
+  value.stage = {
+    key: "active",
+    label: "Памп триває",
+    supportingShort: [],
+    againstShort: ["ціна зростає"],
+    missing: ["якість свічок 1h: INCOMPLETE; попередній памп для стадій «Можливий розподіл» і «Розворот підтверджено» не перевірений"],
+    priceMomentum: "позитивне зростання",
+    volumeEvidence: "RVOL підвищений",
+    continuationRisk: "підвищений через позитивний імпульс ціни"
+  };
+  const html = renderPanel(value);
+  assert.match(html, /Стадія пампу: Памп триває/);
+  assert.match(html, /Не перевірено:<\/strong> якість свічок 1h: INCOMPLETE; попередній памп.*«Можливий розподіл».*«Розворот підтверджено» не перевірений/);
+  assert.doesNotMatch(html, /якість свічок 1h не підтверджує памп-стадію/);
+});
+
 function functionSource(name) {
   const start = source.indexOf("function " + name + "(");
   const end = source.indexOf("\nfunction ", start + 1);
@@ -111,6 +150,8 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   assert.equal(models.Q_USDT.strategy.allowed, false);
   assert.equal(models.Q_USDT.strategy.readiness.ready, false);
   assert.equal(models.Q_USDT.strategy.status, "DATA UNAVAILABLE");
+  assert.equal(models.Q_USDT.stage.key, "insufficient");
+  assert.equal(models.Q_USDT.stage.continuationRisk, "неможливо оцінити");
 });
 
 test("visualization crosshair shares pointer interaction across charts and resets on timeframe changes", function () {
