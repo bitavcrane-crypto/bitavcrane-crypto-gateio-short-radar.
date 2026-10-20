@@ -353,6 +353,73 @@ test("missing volume remains unavailable and is not described as elevated or hol
   assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);
 });
 
+test("weak price structure and momentum with pumpScore zero do not indicate distribution or reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    return index >= 57 ? -0.1 : 0.01;
+  }, function (index) {
+    return index === 55 ? 200 : index >= 57 ? 5 : 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: Number(candles15[candles15.length - 1].c) }, nowSeconds: now
+  });
+  assert.equal(model.pumpScore, 0);
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
+});
+
+test("pumpScore 35 with a closed support break and bearish 1h does not confirm pump reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
+    function (index) { return index === 59 ? 100 : 10; });
+  candles15[59] = Object.assign({}, candles15[59], {
+    o: "110", h: "110.5", l: "100", c: "101", v: "100"
+  });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return -0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 101 }, nowSeconds: now
+  });
+  assert.equal(model.pumpScore, 35);
+  assert.equal(model.strategy.flags.bearish1h, true);
+  assert.notEqual(model.stage.key, "reversal");
+});
+
+test("incomplete interval quality cannot confirm distribution or reversal", function () {
+  const now = 1710000000;
+  const candles15 = makeTimedCandles(60, now, 900, function (index) {
+    if (index === 55) return 12;
+    if (index >= 56 && index <= 58) return -2;
+    if (index === 59) return 3;
+    return 0.05;
+  }, function (index) {
+    if (index === 55) return 200;
+    if (index === 57 || index === 58) return 5;
+    if (index === 59) return 100;
+    return 10;
+  });
+  const candles5 = makeTimedCandles(60, now, 300,
+    function (index) { return index === 59 ? 3 : 0.01; }, function () { return 10; });
+  const candles1h = makeTimedCandles(60, now, 3600, function () { return 0.05; }, function () { return 10; });
+  candles1h.splice(30, 1);
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const model = buildMarketData({
+    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.ok(model.pumpScore >= 45);
+  assert.equal(model.data.qualities["1h"], "INCOMPLETE");
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
+  assert.match(model.stage.missing.join(" "), /якість свічок 1h/);
+});
+
 test("lower highs and fading volume from independent groups indicate possible distribution", function () {
   const now = 1710000000;
   const candles15 = makeTimedCandles(60, now, 900, function (index) {
@@ -388,13 +455,24 @@ test("closed support break with bearish hourly structure confirms reversal stage
   candles15[59] = Object.assign({}, candles15[59], {
     o: "110", h: "110.5", l: "100", c: "101", v: "100"
   });
-  const candles5 = makeTimedCandles(60, now, 300, function () { return -0.05; }, function () { return 10; });
+  const candles5 = makeTimedCandles(60, now, 300, function () { return 0.05; }, function () { return 10; });
+  const previous5mClose = Number(candles5[58].c);
+  candles5[59] = Object.assign({}, candles5[59], {
+    o: String(previous5mClose), h: String(previous5mClose * 1.018),
+    l: String(previous5mClose * 0.996), c: String(previous5mClose * 1.012)
+  });
   const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
-  const candles4h = makeTimedCandles(60, now, 14400, function () { return -0.05; }, function () { return 10; });
+  const candles4h = makeTimedCandles(60, now, 14400, function () { return 0.05; }, function () { return 10; });
+  const previous4hClose = Number(candles4h[58].c);
+  candles4h[59] = Object.assign({}, candles4h[59], {
+    o: String(previous4hClose), h: String(previous4hClose * 1.125),
+    l: String(previous4hClose * 0.996), c: String(previous4hClose * 1.12)
+  });
   const model = buildMarketData({
     candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
     ticker: { quality: "OK", last: 101 }, nowSeconds: now
   });
+  assert.ok(model.pumpScore >= 45);
   assert.equal(model.stage.key, "reversal");
   assert.ok(model.stage.supportingShort.some(function (reason) { return reason.includes("нижче мінімумів"); }));
   assert.notEqual(model.state.key, "entry");

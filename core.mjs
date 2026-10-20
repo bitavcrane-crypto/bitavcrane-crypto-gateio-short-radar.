@@ -363,6 +363,8 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const candles = data.candles15;
   const indicators = data.indicators;
   const missing = [];
+  // 45 matches signalState's existing "Памп формується" threshold; lower scores are watch-only.
+  const pumpStageThreshold = 45;
   const volumeEvidence = finite(data.volumeRatio) ?
     "RVOL " + data.volumeRatio.toFixed(2) + "× від середнього 20 попередніх закритих 15m свічок" :
     "RVOL недоступний";
@@ -390,6 +392,23 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
     };
   }
 
+  const pumpEvidenceIntervals = ["5m", "15m", "1h", "4h"];
+  const pumpEvidenceQualityReady = pumpEvidenceIntervals.every(function (interval) {
+    return data.qualities[interval] === QUALITY.OK && finite(data.changes[interval]);
+  });
+  const pumpEvidenceReady = pumpEvidenceQualityReady && candles.length >= 21 && finite(data.volumeRatio);
+  if (!pumpEvidenceQualityReady) {
+    pumpEvidenceIntervals.forEach(function (interval) {
+      if (data.qualities[interval] !== QUALITY.OK) {
+        missing.push("якість свічок " + interval + " не підтверджує памп-стадію: " + data.qualities[interval]);
+      } else if (!finite(data.changes[interval])) {
+        missing.push("зміна ціни " + interval + " недоступна для підтвердження памп-стадії");
+      }
+    });
+  }
+  if (candles.length < 21) missing.push("потрібні щонайменше 21 закрита 15m свічка для підтвердження RVOL");
+  const confirmedPriorPump = pumpEvidenceReady && pump >= pumpStageThreshold;
+
   const latest = candles[candles.length - 1];
   const previousBlock = candles.slice(-6, -3);
   const recentBlock = candles.slice(-3);
@@ -413,8 +432,8 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const bearishMomentum = Boolean(indicators.macd && indicators.macd.bearishCross && upperWick);
   const momentumWeak = Boolean(indicators.obvDivergence || volumeFading || bearishMomentum);
   const bearishOneHour = Boolean(strategy.flags && strategy.flags.bearish1h);
-  const reversalConfirmed = supportBreak && bearishOneHour;
-  const distributionPossible = structureWeak && momentumWeak;
+  const reversalConfirmed = confirmedPriorPump && supportBreak && bearishOneHour;
+  const distributionPossible = confirmedPriorPump && structureWeak && momentumWeak;
   const positivePrice = [data.changes["5m"], data.changes["15m"], data.changes["1h"]]
     .some(function (change) { return finite(change) && change > 0; });
   const previous45mReturn = relativeChange(candles[candles.length - 4].close, candles[candles.length - 7].close);
