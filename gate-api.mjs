@@ -11,16 +11,18 @@ function numeric(value) {
   return Number.isFinite(result) ? result : null;
 }
 
-async function request(path, cacheMs) {
+async function request(path, cacheMs, signal) {
+  if (signal) signal.throwIfAborted();
   const now = Date.now();
   const cached = cache.get(path);
   if (cached && now - cached.time < cacheMs) return cached.value;
   const response = await fetch(API_ROOT + path, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(15000)
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000)
   });
   if (!response.ok) throw new Error("Gate.io відповів HTTP " + response.status);
   const data = await response.json();
+  if (signal) signal.throwIfAborted();
   const time = Date.now();
   if (data && typeof data === "object") {
     receivedAt.set(data, time);
@@ -48,20 +50,20 @@ export async function fetchCandles(contract, interval) {
   return fetchCandlesWithLimit(contract, interval, 80);
 }
 
-export async function fetchVisualizationCandles(contract, interval) {
-  return fetchCandlesWithLimit(contract, interval, VISUALIZATION_CANDLE_LIMIT);
+export async function fetchVisualizationCandles(contract, interval, signal) {
+  return fetchCandlesWithLimit(contract, interval, VISUALIZATION_CANDLE_LIMIT, signal);
 }
 
-async function fetchCandlesWithLimit(contract, interval, limit) {
+async function fetchCandlesWithLimit(contract, interval, limit, signal) {
   const query = "?contract=" + encodeURIComponent(contract) + "&interval=" + encodeURIComponent(interval) + "&limit=" + limit;
-  const rows = await request("/futures/usdt/candlesticks" + query, CACHE_MS);
+  const rows = await request("/futures/usdt/candlesticks" + query, CACHE_MS, signal);
   if (!Array.isArray(rows)) throw new Error("Некоректні свічки " + contract + " " + interval);
   return rows;
 }
 
-export async function fetchContractStats(contract) {
+export async function fetchContractStats(contract, signal) {
   const query = "?contract=" + encodeURIComponent(contract) + "&interval=5m&limit=100";
-  const rows = await request("/futures/usdt/contract_stats" + query, CACHE_MS);
+  const rows = await request("/futures/usdt/contract_stats" + query, CACHE_MS, signal);
   if (!Array.isArray(rows)) throw new Error("Некоректна статистика " + contract);
   return rows;
 }

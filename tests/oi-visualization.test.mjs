@@ -70,3 +70,91 @@ test("OI snapshots are deduplicated and future, invalid, and open-bucket data ar
   assert.equal(buildOpenInterestSeries([{ time: start, openInterest: 1000 }], "5m", start + 600).status, "unavailable");
   assert.equal(buildOpenInterestSeries([{ time: start, topLongOpenInterest: 10 }], "1m", start + 900).status, "unavailable");
 });
+
+test("OI source freshness is independent per field and missing trailing samples stay null", function () {
+  const start = 1710000000;
+  const rows = samples(12, start);
+  rows[10].topLongOpenInterest = null;
+  rows[11].topLongOpenInterest = null;
+  const result = buildOpenInterestSeries(rows, "5m", start + 3900);
+  assert.equal(result.source.long.status, "missing");
+  assert.equal(result.source.long.lastTime, start + 2700);
+  assert.equal(result.source.long.stale, true);
+  assert.equal(result.source.short.status, "ok");
+  assert.equal(result.source.short.lastTime, start + 3300);
+  assert.deepEqual(result.rows.slice(-3).map(function (row) {
+    return [row.topLongOpenInterest, row.topShortOpenInterest];
+  }), [[null, 190], [null, 189], [null, null]]);
+  assert.equal(result.rows.at(-1).time, start + 3600);
+});
+
+test("an absent or malformed single OI field never removes the other series", function () {
+  const start = 1710000000;
+  const result = buildOpenInterestSeries([
+    { time: start, topLongOpenInterest: -1, topShortOpenInterest: 200 },
+    { time: start + 300, topLongOpenInterest: null, topShortOpenInterest: 201 }
+  ], "5m", start + 600);
+  assert.equal(result.status, "ok");
+  assert.equal(result.source.long.status, "unavailable");
+  assert.equal(result.source.long.lastTime, null);
+  assert.deepEqual(result.rows.map(function (row) { return row.topLongOpenInterest; }), [null, null]);
+  assert.deepEqual(result.rows.map(function (row) { return row.topShortOpenInterest; }), [200, 201]);
+});
+
+test("aggregation requires exact five-minute cadence and complete values independently per field", function () {
+  const start = 1710000000;
+  const irregular = buildOpenInterestSeries([0, 1, 2].map(function (offset) {
+    return { time: start + offset, topLongOpenInterest: 100, topShortOpenInterest: 200 };
+  }), "15m", start + 900);
+  assert.equal(irregular.status, "unavailable");
+  assert.equal(irregular.rows[0].topLongOpenInterest, null);
+  const rows = samples(3, start);
+  rows[1].topLongOpenInterest = null;
+  const partial = buildOpenInterestSeries(rows, "15m", start + 900);
+  assert.equal(partial.rows[0].topLongOpenInterest, null);
+  assert.equal(partial.rows[0].topShortOpenInterest, 198);
+});
+
+test("source age is not the age of a completed four-hour aggregate", function () {
+  const start = 1710000000;
+  const rows = samples(95, start);
+  const now = start + 95 * 300;
+  const result = buildOpenInterestSeries(rows, "4h", now);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].time, start + 47 * 300);
+  assert.equal(result.source.long.lastTime, start + 94 * 300);
+  assert.equal(result.source.long.status, "ok");
+  assert.equal(buildOpenInterestSeries(rows, "4h", now + 601).source.long.status, "stale");
+});
+
+test("ancient source timestamps cannot produce unbounded trailing gaps and retain their actual stale time", function () {
+  const now = 1792457700;
+  for (const interval of ["5m", "15m", "1h", "4h"]) {
+    const result = buildOpenInterestSeries([
+      { time: 300, topLongOpenInterest: 100, topShortOpenInterest: 200 }
+    ], interval, now);
+    assert.ok(result.rows.length <= 100);
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.source.long.status, "stale");
+    assert.equal(result.source.long.lastTime, 300);
+    assert.equal(result.source.short.lastTime, 300);
+    assert.equal(result.rows.at(-1).topLongOpenInterest, null);
+  }
+});
+
+test("a consistent five-minute phase offset preserves actual snapshot times without rounding or interpolation", function () {
+  const start = 1710000000;
+  for (const phase of [1, 60, 299]) {
+    const rows = samples(6, start + phase);
+    const result = buildOpenInterestSeries(rows, "15m", start + 1800);
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.rows.map(function (row) { return row.time; }), [start + 600 + phase, start + 1500 + phase]);
+    assert.deepEqual(result.rows.map(function (row) { return row.topLongOpenInterest; }), [102, 105]);
+    assert.equal(result.source.long.lastTime, start + 1500 + phase);
+    const inconsistent = buildOpenInterestSeries([
+      rows[0], { ...rows[1], time: rows[1].time + 1 }, rows[2]
+    ], "15m", start + 900);
+    assert.equal(inconsistent.status, "unavailable");
+    assert.equal(inconsistent.rows[0].topLongOpenInterest, null);
+  }
+});
