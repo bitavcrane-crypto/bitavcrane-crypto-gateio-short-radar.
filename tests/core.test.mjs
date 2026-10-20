@@ -362,15 +362,18 @@ test("missing volume remains unavailable and is not described as elevated or hol
   const model = buildMarketData({
     candles: {
       "5m": noVolume(makeTimedCandles(60, now, 300, function () { return 0.1; }, function () { return 10; })),
-      "15m": noVolume(makeTimedCandles(60, now, 900, function () { return 0.1; }, function () { return 10; })),
+      "15m": noVolume(makeTimedCandles(60, now, 900,
+        function (index) { return index === 59 ? 3 : 0.1; }, function () { return 10; })),
       "1h": makeTimedCandles(60, now, 3600, function () { return 0.1; }, function () { return 10; }),
       "4h": makeTimedCandles(60, now, 14400, function () { return 0.1; }, function () { return 10; })
     },
     ticker: { quality: "OK", last: 120 }, nowSeconds: now
   });
   assert.equal(model.data.volumeRatio, null);
+  assert.ok(model.data.changes["15m"] >= 2);
   assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
   assert.match(model.stage.missing.join(" "), /RVOL.*недоступний/);
+  assert.match(model.stage.continuationRisk, /неможливо оцінити.*RVOL недоступний/);
   assert.notEqual(model.stage.key, "distribution");
   assert.notEqual(model.stage.key, "reversal");
   assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);

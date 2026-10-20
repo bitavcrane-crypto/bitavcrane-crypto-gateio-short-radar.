@@ -502,9 +502,10 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
     missing: missing,
     priceMomentum: priceMomentum,
     volumeEvidence: volumeEvidence,
-    continuationRisk: reversalConfirmed ? "структура ціни зламана; squeeze-ризик залишається" :
-      activeUptrend ? "підвищений через позитивний імпульс ціни; " + volumeContinuation :
-        pump >= 45 ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
+    continuationRisk: !finite(data.volumeRatio) ? "неможливо оцінити: RVOL недоступний" :
+      reversalConfirmed ? "структура ціни зламана; squeeze-ризик залишається" :
+        activeUptrend ? "підвищений через позитивний імпульс ціни; " + volumeContinuation :
+          pump >= 45 ? "залишається: розворот ще не підтверджено" : "не підвищений за наявними даними"
   };
 }
 
