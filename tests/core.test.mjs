@@ -63,6 +63,22 @@ function makeTimedCandles(count, now, interval, trend, volume) {
   });
 }
 
+function addHistoricalPump(candles, startIndex) {
+  let close = Number(candles[startIndex].o);
+  for (let offset = 0; offset < 3; offset += 1) {
+    const candle = candles[startIndex + offset];
+    const open = close;
+    close = offset === 0 ? open * 1.04 : open * 1.001;
+    candles[startIndex + offset] = Object.assign({}, candle, {
+      o: String(open),
+      h: String(close * 1.004),
+      l: String(open * 0.996),
+      c: String(close),
+      v: offset === 0 ? "200" : "10"
+    });
+  }
+}
+
 test("normalizes candles, removes duplicates and excludes open/future candles", function () {
   const now = 1700000000 + 4 * 300 + 250;
   const input = [
@@ -337,7 +353,7 @@ test("strong rising pump remains active despite high RSI", function () {
   assert.equal(model.strategy.allowed, false);
 });
 
-test("active pump stays active with incomplete 1h data and explains the limited confirmation", function () {
+test("incomplete 1h data does not affect stage classification", function () {
   const now = 1710000000;
   const candles15 = makeTimedCandles(60, now, 900,
     function (index) { return index === 59 ? 4 : 0.05; },
@@ -354,8 +370,7 @@ test("active pump stays active with incomplete 1h data and explains the limited 
   assert.ok(model.pumpScore >= 45);
   assert.equal(model.data.qualities["1h"], "INCOMPLETE");
   assert.equal(model.stage.key, "active");
-  assert.match(model.stage.missing.join(" "), /1h: INCOMPLETE.*попередній памп.*«Можливий розподіл».*«Розворот підтверджено»/);
-  assert.doesNotMatch(model.stage.missing.join(" "), /якість свічок 1h не підтверджує памп-стадію/);
+  assert.doesNotMatch(model.stage.missing.join(" "), /якість свічок 1h|якість свічок 4h/);
 });
 
 test("genuine price deceleration compares equal 45-minute windows from closed 15m candles", function () {
@@ -381,7 +396,7 @@ test("genuine price deceleration compares equal 45-minute windows from closed 15
   assert.notEqual(model.strategy.allowed, true);
 });
 
-test("missing volume remains unavailable and is not described as elevated or holding", function () {
+test("missing or invalid RVOL keeps continuation risk unknown", function () {
   const now = 1710000000;
   const noVolume = function (candles) {
     return candles.map(function (candle) {
@@ -408,6 +423,20 @@ test("missing volume remains unavailable and is not described as elevated or hol
   assert.notEqual(model.stage.key, "distribution");
   assert.notEqual(model.stage.key, "reversal");
   assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);
+
+  const invalidVolume15 = makeTimedCandles(60, now, 900, function () { return 0.1; }, function () { return 10; });
+  invalidVolume15[59].v = "invalid";
+  const invalidVolumeModel = buildMarketData({
+    candles: {
+      "5m": makeTimedCandles(60, now, 300, function () { return 0.1; }, function () { return 10; }),
+      "15m": invalidVolume15,
+      "1h": [],
+      "4h": []
+    },
+    ticker: { quality: "OK", last: 120 }, nowSeconds: now
+  });
+  assert.equal(invalidVolumeModel.data.volumeRatio, null);
+  assert.match(invalidVolumeModel.stage.continuationRisk, /неможливо оцінити.*RVOL недоступний/);
 });
 
 test("weak price structure and momentum with pumpScore zero do not indicate distribution or reversal", function () {
@@ -429,26 +458,27 @@ test("weak price structure and momentum with pumpScore zero do not indicate dist
   assert.notEqual(model.stage.key, "reversal");
 });
 
-test("pumpScore 35 with a closed support break and bearish 1h does not confirm pump reversal", function () {
+test("historical closed-window pump confirms reversal despite a low pumpScore and missing 1h/4h data", function () {
   const now = 1710000000;
   const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
     function (index) { return index === 59 ? 100 : 10; });
+  addHistoricalPump(candles15, 25);
   candles15[59] = Object.assign({}, candles15[59], {
     o: "110", h: "110.5", l: "100", c: "101", v: "100"
   });
   const candles5 = makeTimedCandles(60, now, 300, function () { return 0; }, function () { return 10; });
-  const candles1h = makeTimedCandles(60, now, 3600, function () { return -0.05; }, function () { return 10; });
-  const candles4h = makeTimedCandles(60, now, 14400, function () { return -0.05; }, function () { return 10; });
   const model = buildMarketData({
-    candles: { "5m": candles5, "15m": candles15, "1h": candles1h, "4h": candles4h },
+    candles: { "5m": candles5, "15m": candles15, "1h": [], "4h": [] },
     ticker: { quality: "OK", last: 101 }, nowSeconds: now
   });
   assert.equal(model.pumpScore, 35);
-  assert.equal(model.strategy.flags.bearish1h, true);
-  assert.notEqual(model.stage.key, "reversal");
+  assert.equal(model.data.qualities["1h"], "NO DATA");
+  assert.equal(model.data.qualities["4h"], "NO DATA");
+  assert.equal(model.stage.key, "reversal");
+  assert.notEqual(model.state.key, "entry");
 });
 
-test("incomplete interval quality cannot confirm distribution or reversal", function () {
+test("incomplete hourly data does not block historical distribution classification", function () {
   const now = 1710000000;
   const candles15 = makeTimedCandles(60, now, 900, function (index) {
     if (index === 55) return 12;
@@ -472,9 +502,8 @@ test("incomplete interval quality cannot confirm distribution or reversal", func
   });
   assert.ok(model.pumpScore >= 45);
   assert.equal(model.data.qualities["1h"], "INCOMPLETE");
-  assert.notEqual(model.stage.key, "distribution");
-  assert.notEqual(model.stage.key, "reversal");
-  assert.match(model.stage.missing.join(" "), /якість свічок 1h/);
+  assert.equal(model.stage.key, "distribution");
+  assert.doesNotMatch(model.stage.missing.join(" "), /якість свічок 1h/);
 
   const missingIntervalModel = buildMarketData({
     candles: { "5m": candles5, "15m": candles15, "1h": [], "4h": candles4h },
@@ -482,12 +511,11 @@ test("incomplete interval quality cannot confirm distribution or reversal", func
   });
   assert.ok(missingIntervalModel.pumpScore >= 45);
   assert.equal(missingIntervalModel.data.qualities["1h"], "NO DATA");
-  assert.notEqual(missingIntervalModel.stage.key, "distribution");
-  assert.notEqual(missingIntervalModel.stage.key, "reversal");
-  assert.match(missingIntervalModel.stage.missing.join(" "), /якість свічок 1h/);
+  assert.equal(missingIntervalModel.stage.key, "distribution");
+  assert.doesNotMatch(missingIntervalModel.stage.missing.join(" "), /якість свічок 1h/);
 });
 
-test("incomplete 4h data blocks otherwise supported distribution and reversal labels", function () {
+test("incomplete 4h data does not block historically supported distribution or reversal labels", function () {
   const now = 1710000000;
   const distribution15 = makeTimedCandles(60, now, 900, function (index) {
     if (index === 55) return 12;
@@ -511,11 +539,12 @@ test("incomplete 4h data blocks otherwise supported distribution and reversal la
   });
   assert.ok(distribution.pumpScore >= 45);
   assert.equal(distribution.data.qualities["4h"], "INCOMPLETE");
-  assert.notEqual(distribution.stage.key, "distribution");
-  assert.match(distribution.stage.missing.join(" "), /4h: INCOMPLETE.*попередній памп/);
+  assert.equal(distribution.stage.key, "distribution");
+  assert.doesNotMatch(distribution.stage.missing.join(" "), /якість свічок 4h/);
 
   const reversal15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
     function (index) { return index === 59 ? 100 : 10; });
+  addHistoricalPump(reversal15, 25);
   reversal15[59] = Object.assign({}, reversal15[59], {
     o: "110", h: "110.5", l: "100", c: "101", v: "100"
   });
@@ -540,8 +569,8 @@ test("incomplete 4h data blocks otherwise supported distribution and reversal la
   assert.ok(reversal.pumpScore >= 45);
   assert.equal(reversal.data.qualities["4h"], "INCOMPLETE");
   assert.equal(reversal.strategy.flags.bearish1h, true);
-  assert.notEqual(reversal.stage.key, "reversal");
-  assert.match(reversal.stage.missing.join(" "), /4h: INCOMPLETE.*попередній памп/);
+  assert.equal(reversal.stage.key, "reversal");
+  assert.doesNotMatch(reversal.stage.missing.join(" "), /якість свічок 4h/);
 });
 
 test("lower highs and fading volume from independent groups indicate possible distribution", function () {
@@ -572,10 +601,11 @@ test("lower highs and fading volume from independent groups indicate possible di
   assert.equal(model.strategy.allowed, false);
 });
 
-test("closed support break with bearish hourly structure confirms reversal stage, not entry by itself", function () {
+test("historical pump and a closed 15m support break confirm reversal stage, not entry by itself", function () {
   const now = 1710000000;
   const candles15 = makeTimedCandles(60, now, 900, function () { return 0.05; },
     function (index) { return index === 59 ? 100 : 10; });
+  addHistoricalPump(candles15, 25);
   candles15[59] = Object.assign({}, candles15[59], {
     o: "110", h: "110.5", l: "100", c: "101", v: "100"
   });
@@ -609,7 +639,7 @@ test("insufficient candle history produces an unavailable stage instead of a dir
     ticker: { quality: "NO DATA" }, nowSeconds: 1710000000
   });
   assert.equal(model.stage.key, "insufficient");
-  assert.equal(model.stage.continuationRisk, "неможливо оцінити");
+  assert.match(model.stage.continuationRisk, /неможливо оцінити/);
   assert.ok(model.stage.missing.length > 0);
   assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
 });

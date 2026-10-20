@@ -410,7 +410,8 @@ function classifyPumpStage(data, strategy, usableCandles) {
       missing: missing,
       priceMomentum: "не оцінено через недостатню або неякісну історію",
       volumeEvidence: volumeEvidence,
-      continuationRisk: "неможливо оцінити: історія 15m недостатня або неякісна"
+      continuationRisk: hasUsableRvol ? "неможливо оцінити: історія 15m недостатня або неякісна" :
+        "неможливо оцінити: RVOL недоступний"
     };
   }
 
