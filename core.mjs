@@ -363,7 +363,7 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   const candles = data.candles15;
   const indicators = data.indicators;
   const missing = [];
-  // 45 matches signalState's existing "Памп формується" threshold; lower scores are watch-only.
+  // 45 is signalState's existing "Памп формується" threshold; lower scores do not confirm a pump.
   const pumpStageThreshold = 45;
   const volumeEvidence = finite(data.volumeRatio) ?
     "RVOL " + data.volumeRatio.toFixed(2) + "× від середнього 20 попередніх закритих 15m свічок" :
