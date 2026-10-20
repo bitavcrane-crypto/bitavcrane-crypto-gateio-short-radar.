@@ -79,6 +79,24 @@ test("market-stage evidence is displayed inside the existing strategy panel", fu
   assert.match(html, /Ризик продовження: підвищений/);
 });
 
+test("stage evidence explains incomplete interval quality without contradicting an active pump", function () {
+  const value = model();
+  value.stage = {
+    key: "active",
+    label: "Памп триває",
+    supportingShort: [],
+    againstShort: ["ціна зростає"],
+    missing: ["якість свічок 1h: INCOMPLETE; попередній памп для стадій «Можливий розподіл» і «Розворот підтверджено» не перевірений"],
+    priceMomentum: "позитивне зростання",
+    volumeEvidence: "RVOL підвищений",
+    continuationRisk: "підвищений через позитивний імпульс ціни"
+  };
+  const html = renderPanel(value);
+  assert.match(html, /Стадія пампу: Памп триває/);
+  assert.match(html, /Не перевірено:<\/strong> якість свічок 1h: INCOMPLETE; попередній памп.*«Можливий розподіл».*«Розворот підтверджено» не перевірений/);
+  assert.doesNotMatch(html, /якість свічок 1h не підтверджує памп-стадію/);
+});
+
 function functionSource(name) {
   const start = source.indexOf("function " + name + "(");
   const end = source.indexOf("\nfunction ", start + 1);

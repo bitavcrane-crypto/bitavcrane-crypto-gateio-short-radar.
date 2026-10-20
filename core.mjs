@@ -400,9 +400,11 @@ function classifyPumpStage(data, pump, exhaustion, strategy, usableCandles) {
   if (!pumpEvidenceQualityReady) {
     pumpEvidenceIntervals.forEach(function (interval) {
       if (data.qualities[interval] !== QUALITY.OK) {
-        missing.push("якість свічок " + interval + " не підтверджує памп-стадію: " + data.qualities[interval]);
+        missing.push("якість свічок " + interval + ": " + data.qualities[interval] +
+          "; попередній памп для стадій «Можливий розподіл» і «Розворот підтверджено» не перевірений");
       } else if (!finite(data.changes[interval])) {
-        missing.push("зміна ціни " + interval + " недоступна для підтвердження памп-стадії");
+        missing.push("зміна ціни " + interval +
+          " недоступна для перевірки попереднього пампу, потрібного для стадій «Можливий розподіл» і «Розворот підтверджено»");
       }
     });
   }
