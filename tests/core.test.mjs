@@ -371,6 +371,8 @@ test("missing volume remains unavailable and is not described as elevated or hol
   assert.equal(model.data.volumeRatio, null);
   assert.match(model.stage.volumeEvidence, /RVOL недоступний/);
   assert.match(model.stage.missing.join(" "), /RVOL.*недоступний/);
+  assert.notEqual(model.stage.key, "distribution");
+  assert.notEqual(model.stage.key, "reversal");
   assert.doesNotMatch(model.stage.continuationRisk, /RVOL підвищений|обсяг зберігається|обсяг підвищений/);
 });
 
