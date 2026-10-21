@@ -353,7 +353,25 @@ export function evaluateShortStrategy(input = {}) {
   const netRiskReward = finite(calculatedNetRiskReward) ? calculatedNetRiskReward : null;
   const minimumRiskReward = finite(input.minimumRiskReward) && input.minimumRiskReward >= 1 &&
     input.minimumRiskReward <= 5 ? input.minimumRiskReward : 1.5;
+  // Entry is a closed-candle reference, not a still-executable order price.
+  const livePrice = input.ticker && input.ticker.quality === "OK" ? input.ticker.last : null;
+  const liveInsideLevels = validLevels && finite(livePrice) && livePrice > levels.tp1 && livePrice < levels.stop;
+  const liveRiskReward = liveInsideLevels ? (livePrice - levels.tp1) / (levels.stop - livePrice) : null;
+  const liveNetRiskReward = liveInsideLevels && costRate !== null ?
+    (livePrice - levels.tp1 - (livePrice + levels.tp1) * costRate) /
+      (levels.stop - livePrice + (livePrice + levels.stop) * costRate) : null;
+  const referenceExpired = validLevels && finite(livePrice) && !liveInsideLevels;
+  const lateEntry = liveInsideLevels && (liveRiskReward < minimumRiskReward ||
+    (liveNetRiskReward !== null && liveNetRiskReward < minimumRiskReward));
   const blockers = [];
+  if (validLevels && finite(livePrice)) {
+    if (livePrice >= levels.stop) blockers.push("ціна вже досягла Stop або перевищила його — формація скасована");
+    else if (livePrice <= levels.tp1) blockers.push("ціна вже досягла TP1 або нижча — не переслідувати падіння");
+    else if (liveRiskReward < minimumRiskReward ||
+        (liveNetRiskReward !== null && liveNetRiskReward < minimumRiskReward)) {
+      blockers.push("поточна ціна вже не дає мінімального R/R; Entry за закриттям 15m не є поточним входом");
+    }
+  }
   if (!dataReady) blockers.push("NO TRADE — DATA UNAVAILABLE");
   if (setup && !sellingCandle) blockers.push("немає підтвердженого тиску продажів");
   if (setup && !setup.confirmed) blockers.push("формація ще не підтверджена закриттям 15m");
@@ -428,9 +446,13 @@ export function evaluateShortStrategy(input = {}) {
     missingScoreData: Array.from(new Set(missing.concat(score.missing))),
     riskReward: riskReward,
     netRiskReward: netRiskReward,
+    liveRiskReward: liveRiskReward,
+    liveNetRiskReward: liveNetRiskReward,
     riskRewardBasis: costRate === null ? "gross; комісія/витрати недоступні" : "net estimate",
     minimumRiskReward: minimumRiskReward,
     flags: {
+      referenceExpired: referenceExpired,
+      lateEntry: lateEntry,
       bearish15m: bearish15m,
       bearish1h: bearish1h,
       strongBullish4h: strongBullish4h,

@@ -7,6 +7,7 @@ import { buildMarketData, rankPumpCandidates, sortPairsBySignal, transitionSigna
 import { normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "../gate-api.mjs";
 import { buildOpenInterestSeries } from "../oi-visualization.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
+import { chartWindow, contextSeries, formatLevelPrice } from "../radar-presentation.mjs";
 import {
   OPEN_INTEREST_INTERVALS, VISUALIZATION_INTERVALS, removeVisualizationContract,
   setOpenInterestInterval, setVisualizationInterval
@@ -320,7 +321,7 @@ test("primary price chart overlays a valid current ticker price without replacin
   assert.equal(currentTickerPrice({ data: { ticker: { quality: "OK", last: Infinity } } }), null);
   assert.match(source, /const currentPrice = currentTickerPrice\(model\)/);
   assert.match(source, /const model = models\[pair\]/);
-  assert.match(source, /priceChart: true, currentPrice: currentPrice/);
+  assert.match(source, /priceChart: true, currentPrice: viewport.offset === 0 \? currentPrice : null/);
   assert.match(source, /window\.setInterval\(scan, POLL_MS\)/);
 });
 
@@ -386,6 +387,8 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
       pairs: ["Q_USDT"], visualizationData: {}, visualizationRequests: {}, POLL_MS: 60000,
       VISUALIZATION_INTERVALS, OPEN_INTEREST_INTERVALS, AbortController, normalizeCandles: null,
       models: {}, buildOpenInterestSeries, buildIndicatorVisualization,
+      chartWindows: {}, chartWindow, contextSeries, fundingHistory: {},
+      renderMarketContext: function () { return ""; }, formatCrosshairTime: String, formatLevelPrice,
       selectedVisualizationInterval: function () { return "15m"; },
       selectedOpenInterestInterval: function () { return "5m"; },
       escapeHtml: function (value) { return String(value); },
@@ -408,6 +411,38 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     );
     return { globals, ...api };
   }
+
+  test("600-bar chart viewport keeps EMA/OBV time-value alignment and omits redundant oscillator plots", function () {
+    const seconds = 900;
+    const now = Math.floor(Date.now() / 1000 / seconds) * seconds;
+    const candles = Array.from({ length: 600 }, (_, index) => ({
+      time: now - (600 - index) * seconds, open: 100 + index, close: 100.5 + index,
+      low: 99 + index, high: 102 + index, volume: 100 + index
+    }));
+    const calls = [];
+    const harness = visualizationHarness({
+      visualizationData: { Q_USDT: { "15m": { candles, updatedAt: Date.now() } } },
+      chartWindows: { Q_USDT: { count: 600, offset: 0 } },
+      currentTickerPrice: () => null, formatNumber: String,
+      chartSvg: (series, options) => { calls.push({ series, options }); return "<svg></svg>"; },
+      hasBullishFourHourTrend: () => false
+    });
+    const html = harness.renderIndicatorVisualization("Q_USDT");
+    assert.match(html, /600 закритих/);
+    assert.doesNotMatch(html, /<h4>RCI|<h4>KDJ/);
+    assert.ok(calls.length >= 2);
+    for (const call of calls) for (const series of call.series) {
+      assert.equal(series.values.length, series.times.length);
+      assert.equal(series.times.length, 600);
+    }
+    harness.globals.chartWindows.Q_USDT = { count: 48, offset: 24 };
+    calls.length = 0;
+    harness.renderIndicatorVisualization("Q_USDT");
+    for (const call of calls) for (const series of call.series) {
+      assert.equal(series.values.length, 48);
+      assert.equal(series.times.at(-1), candles[575].time);
+    }
+  });
 
   test("OI selector and data render independently during candle loading, errors and gaps", function () {
     const now = Math.floor(Date.now() / 1000 / 300) * 300;
@@ -687,7 +722,8 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
     openInterestSelections: {}, visualizationCrosshairTimes: { Q_USDT: 123 },
     openVisualizations: new Set(["Q_USDT"]), setOpenInterestInterval, setVisualizationInterval,
     removeVisualizationContract, removePair: function (pairs, pair) { return pairs.filter(function (value) { return value !== pair; }); },
-    sortPairsBySignal: function (pairs) { return pairs; }, renderCard: function () { return ""; },
+    rankShortCandidates: function (pairs) { return pairs; }, renderTokenRow: function () { return ""; },
+    openTokens: new Set(), fundingHistory: {}, fundingRequests: {}, chartWindows: {},
     cvdAnalysis: { mount: function () {} },
     savePairs: function () {}, saveVisualizationSelections: function () {}, saveOpenInterestSelections: function () {},
     ensureVisualizationData: function () { assert.fail("OI timeframe change must not fetch candles"); },

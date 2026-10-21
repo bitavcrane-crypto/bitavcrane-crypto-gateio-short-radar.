@@ -87,7 +87,7 @@ test("default semantics fail closed, include provenance, and never access networ
     assert.equal(result.trade, null);
     assert.equal(result.state, "UNAVAILABLE");
     assert.equal(result.source, "WS");
-    assert.match(result.reason, /не підтверджують напрям/);
+    assert.match(result.reason, /дробову точність.*не підтверджено/);
     assert.equal("direction" in result.fields, false);
   }
   const h = harness({ verified: false });

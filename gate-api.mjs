@@ -68,6 +68,18 @@ export async function fetchContractStats(contract, signal) {
   return rows;
 }
 
+export async function fetchFundingHistory(contract, signal) {
+  const rows = await request("/futures/usdt/funding_rate?contract=" +
+    encodeURIComponent(contract) + "&limit=100", 60000, signal);
+  if (!Array.isArray(rows)) throw new Error("Некоректна історія funding Gate.io");
+  const now = Date.now() / 1000;
+  return rows.map(function (row) {
+    return { time: numeric(row.t), ratePercent: numeric(row.r) === null ? null : numeric(row.r) * 100 };
+  }).filter(function (row) {
+    return Number.isFinite(row.time) && row.time > 0 && row.time <= now && Number.isFinite(row.ratePercent);
+  }).sort(function (a, b) { return a.time - b.time; });
+}
+
 export async function fetchOrderBook(contract) {
   const query = "?contract=" + encodeURIComponent(contract) + "&limit=20&with_id=true";
   const book = await request("/futures/usdt/order_book" + query, CACHE_MS);
@@ -256,7 +268,7 @@ export function clearCache() {
 
 export const GATE_CVD_SEMANTICS = Object.freeze({
   verified: false,
-  reason: "Офіційні доступні документи Gate.io не підтверджують напрям агресора за знаком size; CVD недоступний."
+  reason: "Gate.io документує напрям taker за знаком size, але повноту й дробову точність браузерного потоку не підтверджено; автоматичну заміну CVD вимкнено."
 });
 
 function cvdNumber(value) {
@@ -266,7 +278,7 @@ function cvdNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-// Validates magnitude and provenance only: signed size is NOT an aggressor direction.
+// Validates magnitude/provenance only. Direction is documented, but a lossless browser feed is not verified.
 export function normalizeGateTradeFields(row, contract, multiplier, source, now = Date.now()) {
   const invalid = reason => ({ fields: null, state: "UNAVAILABLE", reason, source });
   if (!row || typeof row !== "object" || Array.isArray(row) || row.contract !== contract ||

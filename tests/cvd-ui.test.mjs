@@ -161,7 +161,7 @@ test("CVD transport failure is isolated from radar rendering and pair lifecycle"
     h.click("A_USDT");
     h.controller.dispose();
   });
-  assert.match(h.hosts.get("B_USDT").innerHTML, /CVD Binance \/ Графік/);
+  assert.match(h.hosts.get("B_USDT").innerHTML, /CVD Binance · окреме джерело/);
   assert.match(h.hosts.get("B_USDT").innerHTML, /не потік Gate\.io/);
 });
 

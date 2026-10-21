@@ -44,7 +44,37 @@ button:disabled { cursor: wait; opacity: .6; }
 .settings-grid label { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .settings-grid input[type="checkbox"] { accent-color: #49d4a5; }
 .settings-grid input[type="number"] { width: 58px; padding: 5px; color: #edf2fa; border: 1px solid #2b3a4d; border-radius: 6px; background: #0e1621; }
-.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.list-explanation { color: #9eafc4; font-size: 12px; line-height: 1.6; }
+.list-explanation strong { color: #c8d9eb; }
+.token-row { min-width: 0; border: 1px solid #29384a; border-radius: 12px; background: #111a27; }
+.token-row > summary { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(75px, .65fr) minmax(160px, 2fr) 95px; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; list-style: none; }
+.token-row > summary::-webkit-details-marker { display: none; }
+.token-name { color: #edf2fa; font-weight: 800; font-size: 14px; }
+.token-name::before { content: "▸ "; color: #83a6c5; }
+.token-row[open] > summary .token-name::before { content: "▾ "; }
+.token-price, .token-score { color: #9eafc4; font-size: 12px; font-variant-numeric: tabular-nums; }
+.token-score { text-align: right; }
+.token-verdict { font-size: 12px; }
+.conclusion-ready .token-verdict, .conclusion-ready > strong { color: #70edb9; }
+.conclusion-watch .token-verdict, .conclusion-watch > strong { color: #ffd17c; }
+.conclusion-danger .token-verdict, .conclusion-danger > strong { color: #ff9c93; }
+.conclusion-muted .token-verdict, .conclusion-muted > strong { color: #a6b6ca; }
+.token-body { padding: 0 8px 8px; }
+.short-conclusion { display: grid; gap: 7px; padding: 12px; background: #0c1520; border-left: 3px solid currentColor; border-radius: 7px; font-size: 13px; }
+.short-conclusion span { color: #bccbdd; line-height: 1.55; }
+.technical-details { padding: 10px 0; font-size: 12px; line-height: 1.65; }
+.technical-details > summary { cursor: pointer; color: #a9c7e0; font-weight: 700; }
+.technical-details[open] > summary { margin-bottom: 12px; }
+.chart-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; color: #aabbd0; font-size: 12px; }
+.chart-navigation select { color: #edf2fa; background: #172232; border: 1px solid #2a3b50; border-radius: 5px; padding: 6px; }
+.chart-navigation span { width: 100%; color: #8495aa; font-size: 11px; }
+.cvd-source-hint { color: #8495aa; font-size: 11px; }
+@media (max-width: 650px) {
+  .token-row > summary { grid-template-columns: 1fr auto; gap: 7px; padding: 12px; }
+  .token-verdict { grid-column: 1; }
+  .token-score { grid-column: 2; }
+}
 .card { min-width: 0; padding: 17px; border: 1px solid #253348; border-radius: 15px; background: linear-gradient(145deg, #141e2c, #101722 75%); box-shadow: 0 12px 30px #0002; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .pair-name { margin: 0; font-size: 19px; letter-spacing: .02em; }
@@ -142,7 +172,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .oi-legend .oi-long::before { background: #49d4a5; }
 .oi-legend .oi-short { color: #f18c8c; }
 .oi-legend .oi-short::before { background: #f18c8c; }
-.indicator-chart-svg { display: block; width: 100%; height: 82px; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; }
+.indicator-chart-svg { display: block; width: 100%; height: 210px; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; }
 .visualization-crosshair-time { margin-top: 8px; padding: 8px 10px; color: #8cecff; border: 1px solid #245267; border-radius: 6px; background: #10212c; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .chart-summary, .chart-footnote, .chart-empty, .visualization-message { margin: 5px 0; color: #a9bad0; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .chart-summary strong { color: #edf2fa; }

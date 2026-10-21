@@ -1,9 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  clearCache, fetchCandles, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract,
+  clearCache, fetchCandles, fetchContractStats, fetchFundingHistory, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract,
   normalizeOrderBook, normalizeTicker, normalizeContractStats
 } from "../gate-api.mjs";
+
+test("funding history retains settled timestamps and signed rates, never future or invalid points", async context => {
+  clearCache();
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; clearCache(); });
+  globalThis.fetch = async url => {
+    const parsed = new URL(url);
+    assert.equal(parsed.pathname, "/api/v4/futures/usdt/funding_rate");
+    assert.equal(parsed.searchParams.get("contract"), "Q_USDT");
+    return { ok: true, json: async () => [
+      { t: 1700000000, r: "-0.0001" }, { t: 1700028800, r: "0.0002" },
+      { t: 9999999999, r: "0.01" }, { t: 1700000001, r: null }
+    ] };
+  };
+  assert.deepEqual(await fetchFundingHistory("Q_USDT"), [
+    { time: 1700000000, ratePercent: -0.01 }, { time: 1700028800, ratePercent: 0.02 }
+  ]);
+});
 
 test("visualization candle requests use the requested USDT contract and interval with 600 bars", async function (context) {
   clearCache();

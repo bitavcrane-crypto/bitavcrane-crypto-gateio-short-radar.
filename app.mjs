@@ -1,11 +1,12 @@
 import { addPair, buildMarketData, normalizeCandles, rankPumpCandidates, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
-import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
+import { fetchCandles, fetchContracts, fetchContractStats, fetchFundingHistory, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createVisibleWallTracker } from "./wall-monitor.mjs";
+import { summarizeShort, rankShortCandidates, formatLevelPrice, readableTechnicalText, chartWindow, contextSeries } from "./radar-presentation.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
 import {
   getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
@@ -46,6 +47,10 @@ let models = {};
 let pairErrors = {};
 let events = loadSignalEvents();
 let openVisualizations = new Set();
+let openTokens = new Set();
+let chartWindows = {};
+let fundingHistory = {};
+let fundingRequests = {};
 let visualizationSelections = loadVisualizationSelections();
 let openInterestSelections = loadOpenInterestSelections();
 let visualizationData = {};
@@ -352,7 +357,7 @@ function renderStrategyPanel(model, cvdSnapshot, pair) {
     " · Net R/R 1 : " + formatNumber(strategy.netRiskReward, 2) + " (" + strategy.riskRewardBasis + ")" :
     "Entry/Stop/цілі не розраховані";
   const evidence = function (items) { return items.length ? items.join(" · ") : "поки немає підтверджених ознак"; };
-  return '<section class="strategy-panel"><div class="strategy-heading"><strong>Price × OI · ' +
+  return '<section class="strategy-panel"><details class="technical-details"><summary>Умови входу, блокування та розрахунки</summary><div class="strategy-heading"><strong>Price × OI · ' +
     escapeHtml(setup) + '</strong><span>' + escapeHtml(strategy.status) + "</span></div>" +
     '<div class="market-stage"><strong>Стадія пампу: ' + escapeHtml(stage.label) +
     '</strong><span>Ризик продовження: ' + escapeHtml(stage.continuationRisk) + '</span></div>' +
@@ -368,12 +373,13 @@ function renderStrategyPanel(model, cvdSnapshot, pair) {
     "/100:</strong> " + escapeHtml(scoreReasons) +
     (optionalMissing.length ? " · Додаткові дані для score: " + escapeHtml(optionalMissing.join(" · ")) : "") +
     "</p><p><strong>Відсутні дані:</strong> " +
-    escapeHtml(missing) + "</p><p><strong>Блокування:</strong> " + escapeHtml(blockers) +
+    escapeHtml(missing) + "</p><p><strong>Блокування:</strong> " + escapeHtml(
+      typeof readableTechnicalText === "function" ? readableTechnicalText(blockers) : blockers) +
     "</p><p><strong>Ліквідність:</strong> " + escapeHtml(strategy.liquidity.passed ?
       "ліквідність і спред придатні" : "непридатна або неперевірена; причини наведені вище") +
     "</p><p><strong>Рівні:</strong> " + escapeHtml(levels) + " · " + escapeHtml(confirmation) +
     "</p><p class=\"strategy-time\">Книга заявок оновлена: " + escapeHtml(updateTime) +
-    " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></section>";
+    " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></details></section>";
 }
 
 function currentTickerPrice(model) {
@@ -388,6 +394,7 @@ function chartSvg(seriesList, options) {
   const allValues = seriesList.reduce(function (values, series) {
     return values.concat(series.values.filter(function (value) { return typeof value === "number" && Number.isFinite(value); }));
   }, currentPrice === null ? [] : [currentPrice]);
+  (options.candles || []).forEach(function (candle) { allValues.push(candle.high, candle.low); });
   if (!allValues.length) return '<p class="chart-empty">Немає даних для графіка</p>';
   if (allValues.length < 2) return '<p class="chart-empty">Недостатньо даних для графіка</p>';
   const min = options.min === undefined ? Math.min.apply(null, allValues) : options.min;
@@ -396,7 +403,7 @@ function chartSvg(seriesList, options) {
   const low = options.min === undefined ? min - range * 0.08 : min;
   const high = options.max === undefined ? max + range * 0.08 : max;
   const width = 440;
-  const height = 104;
+  const height = 160;
   const pad = 5;
   const plotEnd = 330;
   const plotTop = pad;
@@ -442,6 +449,15 @@ function chartSvg(seriesList, options) {
         line + '"/>';
     }).join("");
   }).join("");
+  const candlePaths = (options.candles || []).map(function (candle) {
+    const center = x(candle.time);
+    const bodyWidth = Math.max(0.7, Math.min(7, (plotEnd - 2 * pad) / options.candles.length * 0.65));
+    const color = candle.close >= candle.open ? "#49d4a5" : "#f18c8c";
+    return '<line x1="' + center + '" x2="' + center + '" y1="' + y(candle.high) +
+      '" y2="' + y(candle.low) + '" stroke="' + color + '"/><rect x="' + (center - bodyWidth / 2) +
+      '" y="' + Math.min(y(candle.open), y(candle.close)) + '" width="' + bodyWidth +
+      '" height="' + Math.max(0.6, Math.abs(y(candle.open) - y(candle.close))) + '" fill="' + color + '"/>';
+  }).join("");
   const currentPriceOverlay = currentPrice === null ? "" : (function () {
     const position = y(currentPrice);
     const labelY = Math.max(plotTop + 7, Math.min(plotBottom - 2, position));
@@ -454,14 +470,14 @@ function chartSvg(seriesList, options) {
   const seriesData = seriesList.map(function (series) {
     return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits };
   });
-  return '<svg class="indicator-chart-svg" viewBox="0 0 440 104" role="img" aria-label="' +
+  return '<svg class="indicator-chart-svg" viewBox="0 0 440 160" role="img" aria-label="' +
     escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-viewbox-width="' + width +
     '" data-chart-plot-start="' + pad + '" data-chart-plot-end="' + (plotEnd - pad) +
     '" data-chart-plot-top="' + plotTop + '" data-chart-plot-bottom="' + plotBottom +
     '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-role="' +
     (options.priceChart ? "price" : "indicator") + '" data-chart-times=\'' +
     JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
-    backgrounds + guides + markers + paths + currentPriceOverlay +
+    backgrounds + guides + markers + paths + candlePaths + currentPriceOverlay +
     '<line data-crosshair-horizontal x1="' + pad + '" y1="' + plotTop + '" x2="' + (plotEnd - pad) +
     '" y2="' + plotTop + '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
     '<line data-crosshair-line x1="' + pad + '" y1="' + plotTop + '" x2="' + pad + '" y2="' + plotBottom +
@@ -502,7 +518,7 @@ function renderIndicatorVisualization(pair) {
   const lastCandle = data && data.candles && data.candles.length ?
     new Date(data.candles[data.candles.length - 1].time * 1000).toLocaleString("uk-UA") : "немає";
   const header = '<div class="visualization-heading"><strong>' + escapeHtml(pair) +
-    ' · RCI / EMA / KDJ · ' + interval + '</strong><label>Таймфрейм <select data-visualization-timeframe="' +
+    ' · Gate.io · ціна / обсяг / OI / funding · ' + interval + '</strong><label>Таймфрейм <select data-visualization-timeframe="' +
     escapeHtml(pair) + '" aria-label="Таймфрейм графіків ' + escapeHtml(pair) + '">' +
     Object.keys(VISUALIZATION_INTERVALS).map(function (item) {
       return '<option value="' + item + '"' + (item === interval ? " selected" : "") + ">" + item + "</option>";
@@ -518,7 +534,7 @@ function renderIndicatorVisualization(pair) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
   }
   const view = buildIndicatorVisualization(data.candles, currentChartSettings(), Math.floor(Date.now() / 1000),
-    VISUALIZATION_INTERVALS[interval]);
+    VISUALIZATION_INTERVALS[interval], 600);
   if (view.status === "incomplete") {
     return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
       " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>' + oiPanel;
@@ -529,71 +545,47 @@ function renderIndicatorVisualization(pair) {
   const indicators = view.indicators;
   const model = models[pair];
   const currentPrice = currentTickerPrice(model);
-  const chartCandles = view.candles.slice(-48);
+  const windowState = chartWindows[pair] || { count: 240, offset: 0 };
+  const viewport = chartWindow(view.candles.length, windowState.count, windowState.offset);
+  const chartCandles = view.candles.slice(viewport.start, viewport.end);
+  const visibleValues = function (values) { return values.slice(viewport.start, viewport.end); };
   const chartTimes = chartCandles.map(function (candle) { return candle.time; });
   const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
-  const rciColors = ["#77c8ff", "#49d4a5", "#f18c8c"];
-  const rciContent = '<p class="chart-summary">' + rci.lines.map(function (line) {
-    return "RCI(" + line.period + ") <strong>" + formatNumber(line.value, 1) + '</strong> · ' +
-      directionLabel(line.direction);
-  }).join(" · ") + " · шкала −100…+100 · " +
-    (rci.possibleReversalDown ? "можливий розворот униз" : "розворот униз не підтверджено") + "</p>" +
-    chartSvg(rci.lines.map(function (line, index) {
-      return {
-        values: line.values, color: rciColors[index % rciColors.length],
-        label: "RCI " + line.period, digits: 1, times: chartTimes
-      };
-    }), {
-      min: -100, max: 100, guides: [-80, 0, 80], label: "RCI periods " + rci.periods.join(", "),
-      times: chartTimes, domainTimes: chartTimes,
-      zones: [{ from: 80, to: 100, color: "#633b3b66" }, { from: -100, to: -80, color: "#24574366" }]
-    }) + '<p class="chart-footnote">Дивергенція RCI не визначається: надійного алгоритму в модулі немає.</p>';
   const obv = indicators.obv;
   const obvContent = !obv.volumeAvailable ?
     '<p class="chart-empty">Немає даних для OBV · відсутній повний обсяг.</p>' :
       '<p class="chart-summary">Зміна OBV (' + obv.lookback + ' свічок): <strong>' +
         formatNumber(obv.change, 2) + '</strong> · напрямок: ' + directionLabel(obv.direction) + "</p>" +
       chartSvg([
-        { values: obv.values, color: "#e8b86d", label: "OBV", digits: 2, times: chartTimes },
-        { values: obv.averageValues, color: "#77c8ff", label: "SMA " + obv.lookback, digits: 2, times: chartTimes }
+        { values: visibleValues(obv.values), color: "#e8b86d", label: "OBV", digits: 2, times: chartTimes },
+        { values: visibleValues(obv.averageValues), color: "#77c8ff", label: "SMA " + obv.lookback, digits: 2, times: chartTimes }
       ], { label: "OBV та SMA " + obv.lookback, times: chartTimes, domainTimes: chartTimes }) +
       '<p class="chart-footnote">OBV розраховано за напрямком close; лінія згладжування — SMA(' +
       obv.lookback + "). Абсолютний OBV не є самостійним SHORT-сигналом.</p>";
   const ema = indicators.ema;
   const emaColors = ["#49d4a5", "#f18c8c", "#c59bff"];
-  const emaContent = '<p class="chart-summary">Close ' + formatNumber(ema.close, 8) + " · " +
+  const emaContent = '<p class="chart-summary">Close ' + formatLevelPrice(ema.close) + " · " +
     ema.lines.map(function (line) {
-      return "EMA(" + line.period + ") " + formatNumber(line.value, 8) + " " + directionLabel(line.direction);
+      return "EMA(" + line.period + ") " + formatLevelPrice(line.value) + " " + directionLabel(line.direction);
     }).join(" · ") + " · " + ema.position + " · перетин на останній свічці: " +
     (ema.crosses.length ? ema.crosses.map(function (cross) {
       return cross.periods.join("/") + " " + cross.direction;
     }).join(", ") : "немає") + "</p>" +
     chartSvg([{
-      values: ema.closeValues, color: "#f3f5f7", label: "Close", digits: 8, times: chartTimes
+      values: visibleValues(ema.closeValues), color: "#f3f5f7", label: "Close", digits: 8, times: chartTimes
     }].concat(ema.lines.map(function (line, index) {
       return {
-        values: line.values, color: emaColors[index % emaColors.length],
+        values: visibleValues(line.values), color: emaColors[index % emaColors.length],
         label: "EMA " + line.period, digits: 8, times: chartTimes
       };
-    })), { label: "Ціна close та EMA " + ema.periods.join(", "), times: chartTimes, domainTimes: chartTimes }) +
+    })), { label: "Ціна та EMA " + ema.periods.join(", "), times: chartTimes, domainTimes: chartTimes,
+      candles: chartCandles, priceChart: true, currentPrice: viewport.offset === 0 ? currentPrice : null }) +
     (ema.lines.some(function (line) { return !Number.isFinite(line.value); }) ?
       '<p class="chart-footnote">Недостатньо історії для EMA ' + ema.lines.filter(function (line) {
         return !Number.isFinite(line.value);
       }).map(function (line) { return line.period; }).join(", ") + ".</p>" : "");
   const kdj = indicators.kdj;
-  const kdjContent = !Number.isFinite(kdj.k) || !Number.isFinite(kdj.d) || !Number.isFinite(kdj.j) ?
-    '<p class="chart-empty">Недостатньо історії для розрахунку KDJ ' + kdj.period + ".</p>" :
-      '<p class="chart-summary">K ' + formatNumber(kdj.k, 1) + " · D " + formatNumber(kdj.d, 1) +
-        " · J " + formatNumber(kdj.j, 1) + " · напрямки K/D/J: " + directionLabel(kdj.directions.k) + " / " +
-        directionLabel(kdj.directions.d) + " / " + directionLabel(kdj.directions.j) + " · перетин: " +
-        (kdj.cross === "unavailable" ? "недоступний" : kdj.cross === "none" ? "немає" : kdj.cross) +
-        " · можливе виснаження: " + (kdj.possibleExhaustion ? "так" : "не визначено") + "</p>" +
-      chartSvg([
-        { values: kdj.kValues, color: "#77c8ff", label: "K", digits: 1, times: chartTimes },
-        { values: kdj.dValues, color: "#f18c8c", label: "D", digits: 1, times: chartTimes },
-        { values: kdj.jValues, color: "#c59bff", label: "J", digits: 1, times: chartTimes }
-      ], { guides: [20, 50, 80], label: "KDJ", times: chartTimes, domainTimes: chartTimes });
   const shortTermTurn = ema.direction === "bearish" || kdj.cross === "bearish" ||
     rci.possibleReversalDown || kdj.possibleExhaustion ||
     (obv.direction === "bearish" && Number.isFinite(obv.change) && obv.change < 0);
@@ -610,33 +602,31 @@ function renderIndicatorVisualization(pair) {
     escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" : "") +
     '<div class="visualization-meta">' + view.candles.length + " закритих " + interval +
     " свічок · остання свічка: " + escapeHtml(lastCandle) + " · дані оновлено: " + cacheTime + "</div>" +
+    '<div class="chart-navigation"><label>Масштаб <select data-chart-count="' + escapeHtml(pair) + '">' +
+    [48, 120, 240, 600].map(function (count) {
+      return '<option value="' + count + '"' + (windowState.count === count ? " selected" : "") + ">" +
+        count + " свічок</option>";
+    }).join("") + '</select></label><button type="button" class="subtle-button" data-chart-step="' +
+      escapeHtml(pair) + '" data-direction="older">← Раніше</button>' +
+    '<button type="button" class="subtle-button" data-chart-step="' + escapeHtml(pair) +
+      '" data-direction="newer">Пізніше →</button><button type="button" class="subtle-button" data-chart-step="' +
+      escapeHtml(pair) + '" data-direction="latest">До останніх</button>' +
+    '<span>' + escapeHtml(formatCrosshairTime(chartTimes[0])) + " → " +
+      escapeHtml(formatCrosshairTime(chartEndTime)) + " · видно " + chartCandles.length + "</span></div>" +
     '<div class="indicator-chart-grid">' +
-    '<section class="indicator-chart-card"><h4>RCI · ' + rci.periods.join(" / ") + "</h4>" + rciContent + "</section>" +
-    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section>" +
     '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
-    '<section class="indicator-chart-card"><h4>KDJ · ' + kdj.period + " / " + kdj.ma1 + " / " + kdj.ma2 +
-    "</h4>" + kdjContent + "</section></div>" +
+    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section></div>" +
     (model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
       return '<div class="indicator-chart-grid market-chart-grid">' +
-        '<section class="indicator-chart-card"><h4>Ціна · ' + interval + "</h4>" +
-        chartSvg([{
-          values: recent.map(function (candle) { return candle.close; }),
-          color: "#f3f5f7", label: "Close", digits: 8, times: recentTimes
-        }],
-          {
-            label: "Ціна close, " + interval, times: recentTimes, domainTimes: chartTimes,
-            markers: recentTimes.length ? [recentTimes.length - 1] : [],
-            guides: model.strategy.setup ? [model.strategy.setup.level] : [],
-            priceChart: true, currentPrice: currentPrice
-          }) + "</section>" +
         '<section class="indicator-chart-card"><h4>Обсяг · ' + interval + "</h4>" +
         chartSvg([{
           values: recent.map(function (candle) { return candle.volume; }),
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
         }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section></div>";
-    })() : "") + oiPanel +
+    })() : "") + renderMarketContext(pair, chartTimes) +
+    '<details class="technical-details"><summary>Додатково: позиції топтрейдерів (лише за наявності даних)</summary>' + oiPanel + "</details>" +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
     escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
@@ -692,6 +682,50 @@ function renderOpenInterestVisualization(pair) {
         times: oiTimes, domainTimes: oiTimes
       }) : "")) +
     '<p class="chart-footnote">Якщо Gate повертає top_long_size і top_short_size, графік показує ці документовані поля окремими серіями TOP LONG/SHORT OI у контрактах. Чинна схема ContractStat Python SDK Gate описує OI топтрейдерів, а не всього ринку; фактична наявність полів у live-відповіді не перевірена. Загальний open_interest та lsr_account/lsr_taker/top_lsr_size не підміняють ці серії. Інтервал формується останнім 5m знімком у кожному завершеному вікні лише за повної послідовності поля; пропуски не інтерполюються. Час знімків джерела не є часом останньої агрегованої точки.</p></section>';
+}
+
+function renderMarketContext(pair, domainTimes) {
+  const data = models[pair]?.data;
+  const oi = contextSeries(data?.oiVisualizationHistory || [], "openInterest", domainTimes, 600);
+  const funding = contextSeries(fundingHistory[pair]?.rows || [], "ratePercent", domainTimes, 86400);
+  const draw = function (series, label, color, digits) {
+    return series.values.filter(Number.isFinite).length >= 2 ?
+      chartSvg([{ values: series.values, times: series.times, label, color, digits }],
+        { times: series.times, domainTimes, label }) :
+      '<p class="chart-empty">Недостатньо фактичних точок у вибраному діапазоні. Пропуски не заповнюються.</p>';
+  };
+  const oiState = data?.stats?.quality || "NO DATA";
+  const fundingState = fundingHistory[pair]?.error ? " · оновлення недоступне, показано останню історію" :
+    fundingHistory[pair]?.rows ? "" : " · очікування завантаження";
+  return '<div class="indicator-chart-grid market-context-charts">' +
+    '<section class="indicator-chart-card"><h4>Загальний OI · контракти</h4>' +
+    '<p class="chart-footnote">Gate.io · реальні 5m знімки · останні до 100 точок (приблизно 8 год) · стан ' +
+      escapeHtml(oiState) + ' · не net longs/shorts.</p>' + draw(oi, "OI · контракти", "#c59bff", 2) + "</section>" +
+    '<section class="indicator-chart-card"><h4>Funding · фактичні розрахунки, %</h4>' +
+    '<p class="chart-footnote">Gate.io · ставки за фактичний період, не нормалізація до 8h і не прогноз' +
+      escapeHtml(fundingState) + ".</p>" + draw(funding, "Funding · % за період", "#e8b86d", 5) + "</section></div>";
+}
+
+async function ensureFundingHistory(pair) {
+  if (fundingRequests[pair] || (fundingHistory[pair]?.updatedAt &&
+      Date.now() - fundingHistory[pair].updatedAt < 60000)) return;
+  const controller = new AbortController();
+  fundingRequests[pair] = controller;
+  try {
+    const rows = await fetchFundingHistory(pair, controller.signal);
+    if (pairs.includes(pair) && fundingRequests[pair] === controller) {
+      fundingHistory[pair] = { rows, updatedAt: Date.now() };
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && pairs.includes(pair)) {
+      fundingHistory[pair] = { ...fundingHistory[pair], error: error.message };
+    }
+  } finally {
+    if (fundingRequests[pair] === controller) {
+      delete fundingRequests[pair];
+      render();
+    }
+  }
 }
 
 function renderVisualizationControl(pair) {
@@ -837,14 +871,17 @@ function renderCard(pair) {
   const levelData = model.levels;
   const levels = levelData ?
     '<div class="levels">' +
-      '<div class="level"><span>ENTRY*</span><strong>' + formatNumber(levelData.entry, 6) + '</strong></div>' +
-      '<div class="level"><span>STOP</span><strong>' + formatNumber(levelData.stop, 6) + '</strong></div>' +
-      '<div class="level"><span>TP1</span><strong>' + formatNumber(levelData.tp1, 6) + '</strong></div>' +
-      '<div class="level"><span>TP2</span><strong>' + formatNumber(levelData.tp2, 6) + '</strong></div>' +
-      '<div class="level"><span>TP3</span><strong>' + formatNumber(levelData.tp3, 6) + '</strong></div>' +
+      '<div class="level"><span>ENTRY* · 15m</span><strong>' + formatLevelPrice(levelData.entry) + '</strong></div>' +
+      '<div class="level"><span>STOP LOSS</span><strong>' + formatLevelPrice(levelData.stop) + '</strong></div>' +
+      '<div class="level"><span>TP1</span><strong>' + formatLevelPrice(levelData.tp1) + '</strong></div>' +
+      '<div class="level"><span>TP2</span><strong>' + formatLevelPrice(levelData.tp2) + '</strong></div>' +
+      '<div class="level"><span>TP3</span><strong>' + formatLevelPrice(levelData.tp3) + '</strong></div>' +
       '</div><p class="quality-note">Gross R:R до TP1 = 1 : ' + formatNumber(levelData.riskReward, 2) +
         ' · Net R:R = 1 : ' + formatNumber(model.strategy.netRiskReward, 2) +
-      ' · *Оцінка за закриттям 15m' + (levelData.valid === false ?
+      ' · *Орієнтир за закриттям 15m, не поточна ціна ордера. ' +
+      (model.strategy.allowed ? "Умови входу пройдено." : "Це план для спостереження, входу немає.") +
+      ' Поточний Gross / Net R:R: ' + formatNumber(model.strategy.liveRiskReward, 2) + " / " +
+        formatNumber(model.strategy.liveNetRiskReward, 2) + (levelData.valid === false ?
         " · NO TRADE: рівні невалідні" : "") +
       '</p>' : '<p class="quality-note">Entry/Stop/TP з’являться лише для знайденого сетапу з локальною інвалідацією.</p>';
   const qualityNotes = [];
@@ -860,8 +897,10 @@ function renderCard(pair) {
     '</p></div><button class="remove-button" type="button" data-remove="' + escapeHtml(pair) +
     '" aria-label="Видалити ' + escapeHtml(pair) + '">✕</button></div>' +
     displayState(model) +
+    '<p class="short-conclusion conclusion-' + summarizeShort(model).tone + '"><strong>' +
+      escapeHtml(summarizeShort(model).title) + '</strong><span>' + escapeHtml(summarizeShort(model).text) + "</span></p>" +
     '<div class="scores">' + score("PUMP", model.pumpScore) + score("EXHAUSTION", model.exhaustionScore) +
-    score("SHORT", model.shortScore) + '</div><div class="metrics">' +
+    score("SHORT", model.shortScore) + '</div><details class="technical-details"><summary>Показники ринку та якість даних</summary><div class="metrics">' +
     ["5m", "15m", "1h", "4h"].map(function (timeframe) {
       return metric("Ціна · " + timeframe, formatPercent(data.changes[timeframe]), data.qualities[timeframe]);
     }).join("") +
@@ -902,10 +941,22 @@ function renderCard(pair) {
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
-    '</div>' + levels + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) + renderConfirmation(model) +
-    '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
+    '</div></details>' + levels + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) +
+    '<details class="technical-details"><summary>Додаткові індикатори та повне пояснення</summary>' + renderConfirmation(model) +
+    '<p class="why"><strong>Чому?</strong> ' + escapeHtml(readableTechnicalText(model.why)) + '</p></details>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
     renderVisualizationControl(pair) + "</article>";
+}
+
+function renderTokenRow(pair) {
+  const model = models[pair];
+  const conclusion = summarizeShort(model);
+  return '<details class="token-row conclusion-' + conclusion.tone + '" data-token="' + escapeHtml(pair) +
+    '"' + (openTokens.has(pair) ? " open" : "") + '><summary><span class="token-name">' +
+    escapeHtml(pair) + '</span><span class="token-price">' + formatLevelPrice(model?.data?.ticker?.last) +
+    '</span><strong class="token-verdict">' + escapeHtml(conclusion.title) +
+    '</strong><span class="token-score">SHORT ' + (Number.isFinite(model?.shortScore) ? model.shortScore : "—") +
+    '/100</span></summary><div class="token-body">' + renderCard(pair) + "</div></details>";
 }
 
 function render() {
@@ -919,8 +970,15 @@ function render() {
   signalSummaryNode.textContent = activeShortCount ?
     "SHORT підтверджено для " + activeShortCount + (activeShortCount === 1 ? " монети." : " монет.") :
     "Активних SHORT-сигналів немає. Моніторинг триває";
-  cardsNode.innerHTML = pairs.length ? sortPairsBySignal(pairs, models).map(renderCard).join("") :
+  cardsNode.innerHTML = pairs.length ? rankShortCandidates(pairs, models).map(renderTokenRow).join("") :
     '<div class="empty">Список порожній. Додайте контракт Gate.io Futures.</div>';
+  cardsNode.querySelectorAll("[data-token]").forEach(function (row) {
+    row.addEventListener("toggle", function () {
+      const pair = row.getAttribute("data-token");
+      if (row.open) openTokens.add(pair);
+      else openTokens.delete(pair);
+    });
+  });
   cardsNode.querySelectorAll("[data-chart-pair]").forEach(function (panel) {
     bindSynchronizedCrosshair(panel, panel.getAttribute("data-chart-pair"));
   });
@@ -930,6 +988,11 @@ function render() {
   cardsNode.querySelectorAll("[data-remove]").forEach(function (button) {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-remove");
+      openTokens.delete(pair);
+      if (fundingRequests[pair]) fundingRequests[pair].abort();
+      delete fundingRequests[pair];
+      delete fundingHistory[pair];
+      delete chartWindows[pair];
       if (automaticPairs.includes(pair)) {
         automaticPairs = removePair(automaticPairs, pair);
       } else {
@@ -967,7 +1030,29 @@ function render() {
       else {
         openVisualizations.add(pair);
         ensureVisualizationData(pair, selectedVisualizationInterval(pair));
+        ensureFundingHistory(pair);
       }
+      render();
+    });
+  });
+  cardsNode.querySelectorAll("[data-chart-count]").forEach(function (select) {
+    select.addEventListener("change", function () {
+      const pair = select.getAttribute("data-chart-count");
+      chartWindows[pair] = { count: Number(select.value), offset: 0 };
+      delete visualizationCrosshairTimes[pair];
+      render();
+    });
+  });
+  cardsNode.querySelectorAll("[data-chart-step]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      const pair = button.getAttribute("data-chart-step");
+      const state = chartWindows[pair] || { count: 240, offset: 0 };
+      const length = visualizationData[pair]?.[selectedVisualizationInterval(pair)]?.candles?.length || 0;
+      const direction = button.getAttribute("data-direction");
+      const offset = direction === "latest" ? 0 : state.offset +
+        Math.round(state.count / 2) * (direction === "older" ? 1 : -1);
+      chartWindows[pair] = { count: state.count, offset: chartWindow(length, state.count, offset).offset };
+      delete visualizationCrosshairTimes[pair];
       render();
     });
   });
@@ -1040,6 +1125,7 @@ function cancelVisualizationRequest(contract) {
 function refreshOpenVisualizations() {
   openVisualizations.forEach(function (contract) {
     ensureVisualizationData(contract, selectedVisualizationInterval(contract));
+    ensureFundingHistory(contract);
   });
 }
 
