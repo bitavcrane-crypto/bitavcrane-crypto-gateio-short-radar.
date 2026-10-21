@@ -21,7 +21,8 @@ const renderPanel = runInNewContext(source.slice(start, end) + "\nrenderStrategy
     return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   },
   formatNumber: function (value) { return Number.isFinite(value) ? String(value) : "—"; },
-  formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; }
+  formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; },
+  formatCvdContext: function () { return "CVD Binance: потік не активовано."; }
 });
 
 function model() {
@@ -55,7 +56,7 @@ test("detected failed-high formation is not labelled a confirmed entry and repea
   assert.match(html, /SETUP DETECTED/);
   assert.doesNotMatch(html, /SHORT ENTRY дозволено|SETUP CONFIRMED/);
   assert.equal((html.match(/унікальна причина/g) || []).length, 1);
-  assert.equal((source.match(/renderStrategyPanel\(model\)/g) || []).length, 2);
+  assert.equal((source.match(/renderStrategyPanel\(model,/g) || []).length, 2);
 });
 
 test("market-stage evidence is displayed inside the existing strategy panel", function () {
@@ -112,6 +113,50 @@ test("funding UI shows the exact normalized strategy rate alongside its raw sour
   } };
   assert.match(formatFunding(data), /-0.1588%\/8h.*raw -0.0794%\/4.0h/);
   assert.match(formatFunding({ funding: { normalized: null } }), /UNKNOWN/);
+});
+
+test("CVD context stays informational and fails closed when the optional stream is unavailable", function () {
+  const format = runInNewContext(functionSource("formatCvdContext") + "\nformatCvdContext;", {
+    formatNumber: function (value) { return Number.isFinite(value) ? String(value) : "—"; },
+    formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; }
+  });
+  assert.match(format(null), /відкрийте панель CVD/);
+  assert.match(format({ state: "UNAVAILABLE", reason: "STALE_TRADES", frames: {} }), /угоди застаріли/);
+  const context = format({ state: "AVAILABLE", frames: { "15m": {
+    state: "AVAILABLE", delta: -1200, priceChange: 0.8,
+    divergence: { status: "BEARISH" }
+  } } });
+  assert.match(context, /ціна зростає при чистих продажах/);
+  assert.match(context, /можливе поглинання, не сигнал/);
+  assert.match(context, /дивергенція: ведмежа/);
+  assert.match(context, /не самостійний SHORT-сигнал/);
+});
+
+test("pilot simulator is explicitly fictional and scenario controls update the unified explanation", function () {
+  const html = readFileSync(new URL("../pilot.html", import.meta.url), "utf8");
+  assert.match(html, /СИМУЛЯЦІЯ · НЕ LIVE-ДАНІ · НЕ BACKTEST/);
+  assert.match(html, /Whale layer — не вигадуємо/);
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const fields = ["scenario-note", "price", "oi", "funding", "cvd", "book", "liquidations",
+    "price-note", "oi-note", "funding-note", "cvd-note", "book-note", "limits", "engine-state", "engine-reason"];
+  const nodes = new Map(fields.map(function (key) { return [key, { textContent: "" }]; }));
+  const buttons = ["pump", "distribution", "blocked"].map(function (scenario) {
+    return { dataset: { scenario }, attributes: {}, listeners: {}, setAttribute(key, value) {
+      this.attributes[key] = value;
+    }, addEventListener(key, callback) { this.listeners[key] = callback; } };
+  });
+  const document = {
+    querySelectorAll: function () { return buttons; },
+    getElementById: function (key) { return nodes.get(key); }
+  };
+  runInNewContext(script, { document });
+  assert.match(nodes.get("engine-state").textContent, /СПОСТЕРЕЖЕННЯ/);
+  buttons[1].listeners.click();
+  assert.match(nodes.get("cvd-note").textContent, /можливе поглинання/);
+  assert.match(nodes.get("engine-state").textContent, /WATCH/);
+  buttons[2].listeners.click();
+  assert.match(nodes.get("book").textContent, /ЗАСТАРІЛА/);
+  assert.match(nodes.get("engine-state").textContent, /NO TRADE/);
 });
 
 test("entry alerts require every mandatory gate and state changes, including same-candle recovery", function () {

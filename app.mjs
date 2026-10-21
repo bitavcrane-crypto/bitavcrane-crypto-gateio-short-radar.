@@ -5,6 +5,7 @@ import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
+import { createVisibleWallTracker } from "./wall-monitor.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
 import {
   getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
@@ -22,6 +23,7 @@ const VISUALIZATION_SETTINGS_KEY = "gate-short-radar-visualization-settings";
 const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
 const OPEN_INTEREST_STATE_KEY = "gate-short-radar-oi-visualization-state";
 const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
+const EVENTS_KEY = "gate-short-radar-signal-events-v1";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
 };
@@ -42,7 +44,7 @@ let dismissedAutomaticPairs = new Set();
 let pairs = manualPairs.slice();
 let models = {};
 let pairErrors = {};
-let events = [];
+let events = loadSignalEvents();
 let openVisualizations = new Set();
 let visualizationSelections = loadVisualizationSelections();
 let openInterestSelections = loadOpenInterestSelections();
@@ -54,9 +56,16 @@ let visualizationCrosshairTimes = {};
 let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
 let lastSuccessfulUpdate = null;
+const visibleWallTracker = createVisibleWallTracker();
 const cvdAnalysis = createCvdAnalysis({
   chart: chartSvg,
-  getSymbol: gateContractToBinanceSymbol
+  getSymbol: gateContractToBinanceSymbol,
+  onSnapshot: function (contract, snapshot) {
+    const node = Array.from(cardsNode.querySelectorAll("[data-cvd-stage]")).find(function (item) {
+      return item.getAttribute("data-cvd-stage") === contract;
+    });
+    if (node) node.textContent = formatCvdContext(snapshot);
+  }
 });
 
 function loadConfirmationSettings() {
@@ -240,7 +249,54 @@ function renderConfirmation(model) {
     escapeHtml(reasons) + "</p></section>";
 }
 
-function renderStrategyPanel(model) {
+function formatCvdContext(snapshot) {
+  const frame = snapshot && snapshot.frames && snapshot.frames["15m"];
+  if (!snapshot) return "CVD Binance: відкрийте панель CVD для підключення потоку.";
+  if (!frame || snapshot.state !== "AVAILABLE" || frame.state !== "AVAILABLE") {
+    const reasonCode = frame?.reason || snapshot.reason;
+    const reasonLabels = {
+      NO_TRADES: "у 15-хв інтервалі ще немає угод",
+      STALE_TRADES: "угоди застаріли",
+      PARTIAL_COVERAGE: "інтервал покритий не повністю",
+      INVALID_TRADE: "некоректна угода; безперервність потоку втрачена",
+      INVALID_AGGREGATE: "підсумок угод некоректний"
+    };
+    return "CVD Binance: " + (reasonLabels[reasonCode] || reasonCode || "даних 15m недостатньо") +
+      " · не впливає на оцінку SHORT.";
+  }
+  const delta = frame.delta;
+  const price = frame.priceChange;
+  let relation = "напрям потоку нейтральний або не визначений";
+  if (Number.isFinite(delta) && Number.isFinite(price)) {
+    if (delta < 0 && price < 0) relation = "потік продажів збігається зі спадом ціни";
+    else if (delta < 0 && price > 0) relation = "ціна зростає при чистих продажах; можливе поглинання, не сигнал";
+    else if (delta > 0 && price > 0) relation = "потік покупок підтримує зростання";
+    else if (delta > 0 && price < 0) relation = "покупці активні під час спаду; напрям не підтверджено";
+  }
+  const divergence = frame.divergence && frame.divergence.status;
+  const divergenceLabel = divergence === "BEARISH" ? "ведмежа" :
+    divergence === "BULLISH" ? "бичача" : "немає";
+  const divergenceText = divergence && divergence !== "NONE" ?
+    " · дивергенція: " + divergenceLabel : "";
+  return "CVD Binance 15m: Δ " + formatNumber(delta, 0) + " USDT; ціна " +
+    formatPercent(price) + " · " + relation + divergenceText +
+    " · контекст, не самостійний SHORT-сигнал.";
+}
+
+function formatVisibleWalls(summary) {
+  if (!summary || summary.status === "UNAVAILABLE") return summary?.reason || "немає якісного знімка";
+  if (summary.status === "NO_WALL") return "рівнів вище порога не знайдено";
+  const side = function (label, wall) {
+    if (!wall) return label + ": не знайдено";
+    return label + " $" + formatNumber(wall.notionalUsd, 0) + " @ " +
+      formatNumber(wall.price, 6) + " · " + wall.observedSnapshots + "/" +
+      wall.sampleCount + " знімків" + (wall.persistent ? " · повторюється" : "");
+  };
+  return side("покупці", summary.bid) + " / " + side("продавці", summary.ask) +
+    " · лише видимий рівень, не доказ наміру";
+}
+
+function renderStrategyPanel(model, cvdSnapshot, pair) {
   const strategy = model.strategy;
   if (!strategy) return "";
   const stage = model.stage || {
@@ -287,6 +343,8 @@ function renderStrategyPanel(model) {
     escapeHtml(setup) + '</strong><span>' + escapeHtml(strategy.status) + "</span></div>" +
     '<div class="market-stage"><strong>Стадія пампу: ' + escapeHtml(stage.label) +
     '</strong><span>Ризик продовження: ' + escapeHtml(stage.continuationRisk) + '</span></div>' +
+    '<p class="cvd-stage-context" data-cvd-stage="' + escapeHtml(pair || "") + '">' +
+      escapeHtml(formatCvdContext(cvdSnapshot)) + '</p>' +
     '<details class="stage-evidence"><summary>Підтвердження, суперечності та доступність даних</summary>' +
     '<p><strong>Динаміка ціни:</strong> ' + escapeHtml(stage.priceMomentum || "не оцінено") + '</p>' +
     '<p><strong>Обсяг:</strong> ' + escapeHtml(stage.volumeEvidence || "недоступний") + '</p>' +
@@ -813,6 +871,8 @@ function renderCard(pair) {
       "NO TRADE · дані недоступні", data.orderBook && data.orderBook.quality === "OK" ?
         model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA",
       "metric-liquidity") +
+    metric("Великі видимі заявки купівлі/продажу", formatVisibleWalls(data.visibleWalls),
+      null, "metric-liquidity") +
     metric("Funding / період", funding + " / " + interval,
       ticker.quality !== "OK" ? ticker.quality : !Number.isFinite(data.fundingNormalized) ? "INCOMPLETE" : "OK",
       "metric-funding") +
@@ -829,7 +889,7 @@ function renderCard(pair) {
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
-    '</div>' + levels + renderStrategyPanel(model) + renderConfirmation(model) +
+    '</div>' + levels + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) + renderConfirmation(model) +
     '<p class="why"><strong>Чому?</strong> ' + escapeHtml(model.why) + '</p>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
     renderVisualizationControl(pair) + "</article>";
@@ -875,6 +935,7 @@ function render() {
       visualizationSelections = removeVisualizationContract(visualizationSelections, pair);
       openInterestSelections = removeVisualizationContract(openInterestSelections, pair);
       delete visualizationData[pair];
+      if (typeof visibleWallTracker !== "undefined") visibleWallTracker.remove(pair);
       delete visualizationCrosshairTimes[pair];
       openVisualizations.delete(pair);
       savePairs();
@@ -984,10 +1045,27 @@ function notifyChange(pair, oldState, newState, model) {
       !model.strategy.allowed || !model.strategy.dataReady || model.strategy.blockers.length ||
       model.strategy.missing.length)) return;
   const message = pair + ": " + oldState.toUpperCase() + " → " + newState.toUpperCase();
-  events.unshift(new Date().toLocaleTimeString("uk-UA") + " · " + message);
+  events.unshift(new Date().toLocaleString("uk-UA") + " · " + message);
   events = events.slice(0, MAX_EVENTS);
+  try { localStorage.setItem(EVENTS_KEY, JSON.stringify(events)); } catch (error) {
+    if (typeof noticeNode !== "undefined") {
+      noticeNode.hidden = false;
+      noticeNode.textContent = "Журнал змін не вдалося зберегти у цьому браузері.";
+    }
+  }
   if ("Notification" in window && Notification.permission === "granted") {
     try { new Notification("Gate.io SHORT Radar", { body: message }); } catch (error) { /* Browser notification may be unavailable. */ }
+  }
+}
+
+function loadSignalEvents() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter(function (value) {
+      return typeof value === "string" && value.length <= 400;
+    }).slice(0, MAX_EVENTS) : [];
+  } catch (error) {
+    return [];
   }
 }
 
@@ -1235,6 +1313,8 @@ async function scan() {
         const stats = normalizeContractStats(responses[4], nowSeconds);
         const orderBook = responses[5].quality === "NO DATA" ? responses[5] :
           normalizeOrderBook(responses[5], contractMap.get(pair) ? contractMap.get(pair).quantoMultiplier : null, Date.now());
+        const visibleWalls = typeof visibleWallTracker !== "undefined" ?
+          visibleWallTracker.observe(pair, orderBook) : null;
         const model = buildMarketData({
           candles: { "5m": responses[0], "15m": responses[1], "1h": responses[2], "4h": responses[3] },
           ticker: ticker,
@@ -1245,6 +1325,7 @@ async function scan() {
           minimumRiskReward: minimumRiskReward,
           nowSeconds: nowSeconds
         });
+        model.data.visibleWalls = visibleWalls;
         model.data.oiVisualizationHistory = stats.rows;
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
