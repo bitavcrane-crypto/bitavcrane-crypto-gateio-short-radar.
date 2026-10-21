@@ -613,6 +613,7 @@ function renderIndicatorVisualization(pair) {
       escapeHtml(pair) + '" data-direction="latest">До останніх</button>' +
     '<span>' + escapeHtml(formatCrosshairTime(chartTimes[0])) + " → " +
       escapeHtml(formatCrosshairTime(chartEndTime)) + " · видно " + chartCandles.length + "</span></div>" +
+    (viewport.offset > 0 ? '<p class="visualization-message"><strong>Перегляд історії.</strong> Текстові висновки індикаторів і радара стосуються останніх даних, а не минулого вікна. Це не відтворення сигналів і не backtest.</p>' : "") +
     '<div class="indicator-chart-grid">' +
     '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
     '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section></div>" +

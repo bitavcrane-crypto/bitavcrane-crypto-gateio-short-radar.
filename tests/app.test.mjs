@@ -437,7 +437,9 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     }
     harness.globals.chartWindows.Q_USDT = { count: 48, offset: 24 };
     calls.length = 0;
-    harness.renderIndicatorVisualization("Q_USDT");
+    const historicalHtml = harness.renderIndicatorVisualization("Q_USDT");
+    assert.match(historicalHtml, /Перегляд історії/);
+    assert.match(historicalHtml, /не відтворення сигналів/);
     for (const call of calls) for (const series of call.series) {
       assert.equal(series.values.length, 48);
       assert.equal(series.times.at(-1), candles[575].time);
