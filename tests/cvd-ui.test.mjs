@@ -94,7 +94,7 @@ function harness(failure = false) {
       unsubscribe: function (contract) { subscriptions.delete(contract); calls.push(["unsubscribe", contract]); },
       dispose: function () { calls.push(["dispose"]); }
     }; },
-    getMultiplier: function () { return 0.001; },
+    getSymbol: function (contract) { return contract.replace("_", ""); },
     setEvery: function (callback) { timer = callback; return 1; },
     clearEvery: function () { timer = null; }
   });
@@ -145,7 +145,8 @@ test("CVD transport failure is isolated from radar rendering and pair lifecycle"
     h.click("A_USDT");
     h.controller.dispose();
   });
-  assert.match(h.hosts.get("B_USDT").innerHTML, /CVD \/ Графік/);
+  assert.match(h.hosts.get("B_USDT").innerHTML, /CVD Binance \/ Графік/);
+  assert.match(h.hosts.get("B_USDT").innerHTML, /не потік Gate\.io/);
 });
 
 test("PUMP, EXHAUSTION, SHORT and trade levels are invariant with CVD enabled, disabled and unavailable", function () {

@@ -4,6 +4,7 @@ import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConf
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
+import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
 import {
   getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
@@ -55,9 +56,7 @@ let busy = false;
 let lastSuccessfulUpdate = null;
 const cvdAnalysis = createCvdAnalysis({
   chart: chartSvg,
-  getMultiplier: function (contract) {
-    return contracts.find(function (item) { return item.name === contract; })?.quantoMultiplier;
-  }
+  getSymbol: gateContractToBinanceSymbol
 });
 
 function loadConfirmationSettings() {
