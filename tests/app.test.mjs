@@ -310,6 +310,38 @@ test("pilot simulator is explicitly fictional and scenario controls update the u
   assert.match(nodes.get("engine-state").textContent, /NO TRADE/);
 });
 
+test("state changes panel and DOM bindings are removed rather than hidden", function () {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /id="events"|id="event-list"|Зміни стану/);
+  assert.doesNotMatch(source, /eventList|event-list/);
+  assert.doesNotMatch(styles, /\.events\b|\.empty-event\b/);
+});
+
+test("state changes still preserve local records and send permitted browser notifications without a panel", function () {
+  const notifications = [];
+  const storage = new Map();
+  class Notification {
+    static permission = "granted";
+    constructor(title, options) { notifications.push({ title, body: options.body }); }
+  }
+  const api = runInNewContext(functionSource("signalStateLabel") + "\n" +
+    functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
+    events: ["попередній запис"], MAX_EVENTS: 12, EVENTS_KEY: "events",
+    localStorage: { setItem: (key, value) => storage.set(key, value) },
+    window: { Notification }, Notification
+  });
+  api.notifyChange("Q_USDT", "setup", "entry", {
+    confirmed: true, strategy: { allowed: true, dataReady: true, blockers: [], missing: [] }
+  });
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].body, /Q_USDT:.*→ SHORT підтверджено/);
+  assert.equal(JSON.parse(storage.get("events"))[1], "попередній запис");
+  assert.equal(api.getEvents().length, 2);
+  api.notifyChange("Q_USDT", "entry", "entry");
+  assert.equal(notifications.length, 1);
+});
+
 test("entry alerts require every mandatory gate and state changes, including same-candle recovery", function () {
   const api = runInNewContext(functionSource("signalStateLabel") + "\n" +
     functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
@@ -901,7 +933,7 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
   const candles = new AbortController();
   const stats = new AbortController();
   const globals = {
-    document: { getElementById: function () { return {}; } }, signalSummaryNode: {}, eventList: {},
+    document: { getElementById: function () { return {}; } }, signalSummaryNode: {},
     pairs: ["Q_USDT"], manualPairs: ["Q_USDT"], automaticPairs: [], dismissedAutomaticPairs: new Set(),
     models: { Q_USDT: { state: { key: "none" } } }, events: [], pairErrors: {},
     pairVersions: {}, visualizationData: { Q_USDT: { "5m": { loading: true } } },

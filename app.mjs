@@ -39,7 +39,6 @@ const cardsNode = document.getElementById("cards");
 const signalSummaryNode = document.getElementById("signal-summary");
 const noticeNode = document.getElementById("notice");
 const connectionNode = document.getElementById("connection");
-const eventList = document.getElementById("event-list");
 const pairInput = document.getElementById("pair-input");
 let confirmationSettings = loadConfirmationSettings();
 let visualizationSettings = loadVisualizationSettings();
@@ -1335,9 +1334,6 @@ function render() {
   cardsNode.querySelectorAll("[data-chart-pair]").forEach(function (panel) {
     bindSynchronizedCrosshair(panel, panel.getAttribute("data-chart-pair"));
   });
-  eventList.innerHTML = events.length ? events.map(function (event) {
-    return "<li>" + escapeHtml(event) + "</li>";
-  }).join("") : '<li class="empty-event">Нових змін поки немає.</li>';
   cardsNode.querySelectorAll("[data-remove]").forEach(function (button) {
     button.addEventListener("click", function () {
       const pair = button.getAttribute("data-remove");
