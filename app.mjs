@@ -295,7 +295,8 @@ function formatCvdContext(snapshot) {
     " · контекст, не самостійний SHORT-сигнал.";
 }
 
-function formatVisibleWalls(summary) {
+function formatVisibleWalls(summary, orderBook) {
+  if (!orderBook || orderBook.quality !== "OK") return "Книга застаріла або неповна; рівні приховано.";
   if (!summary || summary.status === "UNAVAILABLE") return summary?.reason || "немає якісного знімка";
   if (summary.status === "NO_WALL") return "рівнів вище порога не знайдено";
   const side = function (label, wall) {
@@ -883,7 +884,7 @@ function renderCard(pair) {
       "NO TRADE · дані недоступні", data.orderBook && data.orderBook.quality === "OK" ?
         model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA",
       "metric-liquidity") +
-    metric("Великі видимі заявки купівлі/продажу", formatVisibleWalls(data.visibleWalls),
+    metric("Великі видимі заявки купівлі/продажу", formatVisibleWalls(data.visibleWalls, data.orderBook),
       null, "metric-liquidity") +
     metric("Funding / період", funding + " / " + interval,
       ticker.quality !== "OK" ? ticker.quality : !Number.isFinite(data.fundingNormalized) ? "INCOMPLETE" : "OK",
@@ -1104,6 +1105,7 @@ function lastSuccessLabel() {
 
 function markPairUnavailable(pair, message) {
   pairErrors[pair] = message;
+  if (typeof visibleWallTracker !== "undefined") visibleWallTracker.remove(pair);
   if (!models[pair]) return;
   const unavailableReason = "NO TRADE — DATA UNAVAILABLE: " + message;
   const strategy = models[pair].strategy ? Object.assign({}, models[pair].strategy, {
@@ -1130,6 +1132,7 @@ function markPairUnavailable(pair, message) {
   models[pair] = Object.assign({}, models[pair], {
     data: Object.assign({}, models[pair].data, {
       orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" }),
+      visibleWalls: { status: "UNAVAILABLE", reason: "Книгу після помилки оновлення позначено застарілою." },
       ticker: Object.assign({}, models[pair].data.ticker, { quality: "STALE" }),
       stats: Object.assign({}, models[pair].data.stats, { quality: "STALE" }),
       qualities: { "5m": "STALE", "15m": "STALE", "1h": "STALE", "4h": "STALE" }

@@ -6,6 +6,7 @@ function book(time, hasBid = true) {
   return {
     quality: "OK",
     generatedAt: time,
+    fetchedAt: time * 1000,
     bidLevels: [
       ...(hasBid ? [{ price: 99.9, notionalUsd: 50000 }] : []),
       { price: 99.8, notionalUsd: 1500 },
@@ -22,7 +23,7 @@ test("visible large levels report repeated appearances across distinct book snap
   const tracker = createVisibleWallTracker();
   let result;
   for (let index = 1; index <= 6; index += 1) {
-    result = tracker.observe("BTC_USDT", book(index * 60, index !== 3));
+    result = tracker.observe("BTC_USDT", book(index * 60, index !== 3), index * 60000 + 500);
   }
   assert.equal(result.status, "AVAILABLE");
   assert.deepEqual(
@@ -30,15 +31,26 @@ test("visible large levels report repeated appearances across distinct book snap
     [5, 6, true]
   );
   assert.equal(result.ask, null);
-  assert.equal(tracker.observe("BTC_USDT", book(360)).bid.observedSnapshots, 5);
+  assert.equal(tracker.observe("BTC_USDT", book(360), 360500).bid.observedSnapshots, 5);
 });
 
 test("stale, malformed and cross-pair book data do not create wall persistence", () => {
   const tracker = createVisibleWallTracker();
-  assert.equal(tracker.observe("BTC_USDT", { quality: "STALE" }).status, "UNAVAILABLE");
-  assert.equal(tracker.observe("ETH_USDT", book(60, false)).status, "NO_WALL");
-  assert.equal(tracker.observe("BTC_USDT", book(60)).bid.sampleCount, 1);
-  assert.equal(tracker.observe("BTC_USDT", book(30)).bid.sampleCount, 1);
+  assert.equal(tracker.observe("BTC_USDT", { quality: "STALE" }, 61000).status, "UNAVAILABLE");
+  assert.equal(tracker.observe("ETH_USDT", book(60, false), 61000).status, "NO_WALL");
+  assert.equal(tracker.observe("BTC_USDT", book(60), 61000).bid.sampleCount, 1);
+  assert.equal(tracker.observe("BTC_USDT", book(30), 31000).bid.sampleCount, 1);
+});
+
+test("stale generated or received books clear prior wall history before a later sample", () => {
+  const tracker = createVisibleWallTracker();
+  tracker.observe("BTC_USDT", book(60), 61000);
+  assert.equal(tracker.observe("BTC_USDT", book(120), 150500).status, "UNAVAILABLE");
+  assert.equal(tracker.observe("BTC_USDT", book(151, true), 151500).bid.sampleCount, 1);
+  tracker.observe("ETH_USDT", book(60), 61000);
+  const receivedTooOld = { ...book(145), fetchedAt: 120000 };
+  assert.equal(tracker.observe("ETH_USDT", receivedTooOld, 151000).status, "UNAVAILABLE");
+  assert.equal(tracker.observe("ETH_USDT", book(152), 152500).bid.sampleCount, 1);
 });
 
 test("invalid wall thresholds are rejected", () => {

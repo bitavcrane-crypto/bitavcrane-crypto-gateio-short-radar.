@@ -195,9 +195,12 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   value.confirmed = true;
   value.strategy.allowed = true;
   value.strategy.dataReady = true;
+  value.data.visibleWalls = { status: "AVAILABLE", bid: { notionalUsd: 50000 } };
+  const removed = [];
   const models = { Q_USDT: value };
   const markUnavailable = runInNewContext(functionSource("markPairUnavailable") + "\nmarkPairUnavailable;", {
     models: models, pairErrors: {}, confirmationSettings: {},
+    visibleWallTracker: { remove: function (pair) { removed.push(pair); } },
     evaluateShortConfirmation: function () { return { state: "unavailable" }; }
   });
   markUnavailable("Q_USDT", "HTTP 429");
@@ -207,6 +210,21 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   assert.equal(models.Q_USDT.strategy.status, "DATA UNAVAILABLE");
   assert.equal(models.Q_USDT.stage.key, "insufficient");
   assert.equal(models.Q_USDT.stage.continuationRisk, "неможливо оцінити");
+  assert.equal(models.Q_USDT.data.visibleWalls.status, "UNAVAILABLE");
+  assert.deepEqual(removed, ["Q_USDT"]);
+});
+
+test("stale order books cannot display retained wall amounts or repetition counts", function () {
+  const format = runInNewContext(functionSource("formatVisibleWalls") + "\nformatVisibleWalls;", {
+    formatNumber: function (value) { return String(value); }
+  });
+  const summary = { status: "AVAILABLE", bid: {
+    notionalUsd: 50000, price: 99.9, observedSnapshots: 5, sampleCount: 6, persistent: true
+  }, ask: null };
+  assert.match(format(summary, { quality: "OK" }), /50000/);
+  const stale = format(summary, { quality: "STALE" });
+  assert.match(stale, /рівні приховано/);
+  assert.doesNotMatch(stale, /50000|5\/6/);
 });
 
 test("visualization crosshair shares pointer interaction across charts and resets on timeframe changes", function () {

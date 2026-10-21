@@ -1,4 +1,5 @@
 const DEFAULTS = Object.freeze({ maxSnapshots: 6, minNotionalUsd: 10000, medianMultiple: 3, tolerance: 0.0015 });
+const MAX_BOOK_AGE_MS = 30000;
 
 function validLevel(level) {
   return level && Number.isFinite(level.price) && level.price > 0 &&
@@ -45,18 +46,26 @@ export function createVisibleWallTracker(options = {}) {
     };
   }
 
-  function observe(contract, book) {
+  function observe(contract, book, observedAtMs = Date.now()) {
     if (typeof contract !== "string" || !contract.trim()) {
       return { status: "UNAVAILABLE", reason: "Невідома торгова пара.", bid: null, ask: null };
     }
+    const unavailable = function (reason) {
+      histories.delete(contract);
+      return { status: "UNAVAILABLE", reason: reason, bid: null, ask: null };
+    };
     if (!book || book.quality !== "OK" ||
         !Number.isFinite(book.generatedAt) ||
+        !Number.isFinite(book.fetchedAt) ||
         !Array.isArray(book.bidLevels) || !Array.isArray(book.askLevels)) {
-      return {
-        status: "UNAVAILABLE",
-        reason: "Потрібен свіжий якісний знімок книги заявок.",
-        bid: null, ask: null
-      };
+      return unavailable("Потрібен свіжий якісний знімок книги заявок.");
+    }
+    const observedAt = Number.isFinite(observedAtMs) ? observedAtMs : Date.now();
+    const generatedAgeMs = observedAt - book.generatedAt * 1000;
+    const receiptAgeMs = observedAt - book.fetchedAt;
+    if (generatedAgeMs > MAX_BOOK_AGE_MS || generatedAgeMs < -5000 ||
+        receiptAgeMs > MAX_BOOK_AGE_MS || receiptAgeMs < -5000) {
+      return unavailable("Знімок книги застарів до моменту аналізу.");
     }
     const previous = histories.get(contract) || [];
     const last = previous[previous.length - 1];

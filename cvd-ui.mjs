@@ -144,6 +144,7 @@ export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdSto
   function stop(contract) {
     open.delete(contract);
     try { feed?.unsubscribe(contract); } catch { /* CVD cannot disable the radar. */ }
+    try { onSnapshot(contract, null); } catch { /* Optional context cannot break CVD shutdown. */ }
     if (!open.size && timer !== null) {
       clearEvery(timer);
       timer = null;

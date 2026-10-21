@@ -53,6 +53,7 @@ test("CVD charts break lines across missing intervals instead of interpolating u
 
 function harness(failure = false) {
   const calls = [];
+  const snapshots = [];
   const subscriptions = new Set();
   const listeners = new Map();
   let timer = null;
@@ -80,6 +81,7 @@ function harness(failure = false) {
     }
   };
   const controller = createCvdAnalysis({
+    onSnapshot: function (contract, snapshot) { snapshots.push([contract, snapshot]); },
     createStore: function () { return { snapshot: function (contract) { return {
       state: "UNAVAILABLE", reason: contract + " · напрямок не підтверджено"
     }; } }; },
@@ -102,7 +104,7 @@ function harness(failure = false) {
     const button = { getAttribute: function () { return contract; }, setAttribute: function () {} };
     listeners.get("click")({ target: { closest: function () { return button; } } });
   }
-  return { root, controller, calls, hosts, listeners, click, tick: function () { timer?.(); },
+  return { root, controller, calls, snapshots, hosts, listeners, click, tick: function () { timer?.(); },
     timer: function () { return timer; }, pairs: function (value) { activePairs = value; } };
 }
 
@@ -134,6 +136,20 @@ test("per-pair open, rerender, collapse, automatic removal and teardown release 
   assert.equal(h.timer(), null);
   assert.equal(h.calls.at(-1)[0], "dispose");
   h.controller.dispose();
+});
+
+test("collapsing or disposing CVD immediately publishes a null context snapshot", function () {
+  const h = harness();
+  h.controller.mount(h.root, ["A_USDT", "B_USDT"]);
+  h.click("A_USDT");
+  assert.ok(h.controller.snapshot("A_USDT"));
+  h.click("A_USDT");
+  assert.deepEqual(h.snapshots.at(-1), ["A_USDT", null]);
+  assert.equal(h.controller.snapshot("A_USDT"), null);
+  h.click("B_USDT");
+  h.controller.dispose();
+  assert.deepEqual(h.snapshots.at(-1), ["B_USDT", null]);
+  assert.equal(h.controller.snapshot("B_USDT"), null);
 });
 
 test("CVD transport failure is isolated from radar rendering and pair lifecycle", function () {
