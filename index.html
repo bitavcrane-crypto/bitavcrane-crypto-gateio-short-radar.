@@ -57,18 +57,23 @@
     </details>
     <details class="confirmation-settings">
       <summary>Параметри графіків · глобальні для всіх пар</summary>
-      <p>EMA налаштовує основний графік ціни; RCI залишений лише для допоміжного контексту без окремого графіка. OBV lookback та параметри KDJ беруться з панелі додаткового підтвердження SHORT вище. Ці графічні параметри не змінюють базові сигнали радара; налаштування зберігаються у цьому браузері.</p>
+      <p>EMA налаштовує основний графік ціни; RCI — окремий графік із трьома кривими та шкалою від −100 до +100. RCI можна показати або сховати в меню «Індикатори» біля графіків токена. OBV lookback та параметри KDJ беруться з панелі додаткового підтвердження SHORT вище. Ці графічні параметри не змінюють базові сигнали радара; налаштування зберігаються у цьому браузері.</p>
       <div class="settings-grid">
         <label>RCI · періоди
-          <input type="number" data-vis-period="rci.0" min="2" max="100" value="6" aria-label="RCI період 1">
-          <input type="number" data-vis-period="rci.1" min="2" max="100" value="12" aria-label="RCI період 2">
-          <input type="number" data-vis-period="rci.2" min="2" max="100" value="24" aria-label="RCI період 3"></label>
+          <input type="number" data-vis-period="rci.0" min="2" max="100" value="6" required aria-label="RCI період 1">
+          <input type="number" data-vis-period="rci.1" min="2" max="100" value="12" required aria-label="RCI період 2">
+          <input type="number" data-vis-period="rci.2" min="2" max="100" value="24" required aria-label="RCI період 3"></label>
+        <label>RCI · верхній рівень
+          <input type="number" data-vis-period="rci.upper" min="-100" max="100" step="any" value="95" required aria-label="RCI верхній рівень"></label>
+        <label>RCI · нижній рівень
+          <input type="number" data-vis-period="rci.lower" min="-100" max="100" step="any" value="5" required aria-label="RCI нижній рівень"></label>
         <label>EMA · довгий / середній / короткий період
           <input type="number" data-vis-period="ema.0" min="2" max="500" value="200" aria-label="EMA довга">
           <input type="number" data-vis-period="ema.1" min="2" max="500" value="55" aria-label="EMA середня">
           <input type="number" data-vis-period="ema.2" min="2" max="500" value="22" aria-label="EMA коротка"></label>
       </div>
-      <p>KDJ використовує довжину, MA1 та MA2 з панелі вище. Формула: RSV = (close − мінімум low за довжину) / (максимум high − мінімум low) × 100; при нульовому діапазоні RSV = 50. K — проста MA(RSV, MA1), D — проста MA(K, MA2), J = 3K − 2D.</p>
+      <p>Стандартні візуальні рівні RCI: верхній +95, нижній +5 (саме додатний +5, не −95). Нижній має бути меншим за верхній; обидва можна змінити в межах −100…+100. Ці лінії не змінюють пороги додаткового підтвердження SHORT.</p>
+      <p>KDJ залишається допоміжним підтвердженням без окремої панелі графіка. Він використовує довжину, MA1 та MA2 з панелі вище. Формула: RSV = (close − мінімум low за довжину) / (максимум high − мінімум low) × 100; при нульовому діапазоні RSV = 50. K — проста MA(RSV, MA1), D — проста MA(K, MA2), J = 3K − 2D.</p>
       <button id="reset-visualization" class="subtle-button" type="button">Стандартні параметри графіків</button>
     </details>
     <section class="risk-settings" aria-label="Параметри ризику">

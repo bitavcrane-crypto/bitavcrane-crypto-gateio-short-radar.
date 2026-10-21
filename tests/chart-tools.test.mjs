@@ -9,6 +9,8 @@ test("chart switches normalize only known booleans and never alter a strategy", 
   assert.equal(layers.ema, false);
   assert.equal(layers.whales, false);
   assert.equal(layers.volume, true);
+  assert.equal(layers.rci, true);
+  assert.equal(normalizeChartLayers({ rci: false }).rci, false);
   assert.equal(layers.bad, undefined);
   assert.equal(layers.whaleMode, "levels");
   assert.equal(normalizeChartLayers({ whaleMode: "history" }).whaleMode, "history");
