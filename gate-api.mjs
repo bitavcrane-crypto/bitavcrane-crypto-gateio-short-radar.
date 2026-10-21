@@ -80,6 +80,17 @@ export async function fetchFundingHistory(contract, signal) {
   }).sort(function (a, b) { return a.time - b.time; });
 }
 
+export async function fetchUsdcUsdtRate(signal) {
+  const rows = await request("/spot/tickers?currency_pair=USDC_USDT", 60000, signal);
+  const row = Array.isArray(rows) && rows.find(item => item?.currency_pair === "USDC_USDT");
+  const bid = numeric(row?.highest_bid);
+  const ask = numeric(row?.lowest_ask);
+  if (bid === null || ask === null || bid <= 0 || ask < bid) {
+    throw new Error("Немає перевіреного курсу USDC/USDT: лінії Hyperliquid приховано.");
+  }
+  return { rate: (bid + ask) / 2, fetchedAt: receivedAt.get(row), source: "Gate.io USDC_USDT bid/ask midpoint" };
+}
+
 export async function fetchOrderBook(contract) {
   const query = "?contract=" + encodeURIComponent(contract) + "&limit=20&with_id=true";
   const book = await request("/futures/usdt/order_book" + query, CACHE_MS);

@@ -8,12 +8,16 @@ import { normalizeContract, normalizeContractStats, normalizeOrderBook, normaliz
 import { buildOpenInterestSeries } from "../oi-visualization.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
 import { chartWindow, contextSeries, formatLevelPrice } from "../radar-presentation.mjs";
+import { axisTicks, timeAxisTicks, formatChartValue, layoutAxisLabels, normalizeChartLayers } from "../chart-tools.mjs";
+import { WHALE_COHORT } from "../hyperliquid-cohort.mjs";
+import { freshWhaleSnapshot, hyperliquidCoin, normalizeWhaleHistory, recordWhaleHistory, whaleHistorySeries } from "../hyperliquid.mjs";
 import {
   OPEN_INTEREST_INTERVALS, VISUALIZATION_INTERVALS, removeVisualizationContract,
   setOpenInterestInterval, setVisualizationInterval
 } from "../visualization-state.mjs";
 
 const source = readFileSync(new URL("../app.mjs", import.meta.url), "utf8");
+const svgHelpers = { axisTicks, timeAxisTicks, formatChartValue, layoutAxisLabels };
 const start = source.indexOf("function renderStrategyPanel(");
 const end = source.indexOf("\nfunction ", start + 1);
 const renderPanel = runInNewContext(source.slice(start, end) + "\nrenderStrategyPanel;", {
@@ -100,10 +104,148 @@ test("stage evidence explains incomplete interval quality without contradicting 
 });
 
 function functionSource(name) {
-  const start = source.indexOf("function " + name + "(");
-  const end = source.indexOf("\nfunction ", start + 1);
-  return source.slice(start, end);
+  let start = source.indexOf("function " + name + "(");
+  if (source.slice(start - 6, start) === "async ") start -= 6;
+  const offset = source.slice(start + 1).search(/\n(?:async )?function /);
+  return source.slice(start, offset < 0 ? source.length : start + 1 + offset);
 }
+
+function whaleHarness(overrides = {}) {
+  const now = 1792582000000;
+  const value = { cohortId: WHALE_COHORT.id, time: now / 1000, oldestTime: now, observedAt: now,
+    checked: 45, activeCoins: ["BTC", "ETH"], coins: { BTC: {
+      long: { entry: 100, count: 1 }, short: { entry: 110, count: 2 }
+    } } };
+  const globals = {
+    Date: class extends Date { static now() { return now; } }, AbortController, POLL_MS: 60000,
+    pairs: ["BTC_USDT", "ETH_USDT"], openVisualizations: new Set(["BTC_USDT"]), openTokens: new Set(["BTC_USDT"]),
+    chartLayers: normalizeChartLayers(null), openLayerMenus: new Set(), WHALE_COHORT,
+    whaleState: { status: "idle", snapshot: null }, whaleRequest: null,
+    whaleHistory: normalizeWhaleHistory(null, now / 1000), WHALE_HISTORY_KEY: "history",
+    whaleClient: { snapshot: async () => value },
+    fetchUsdcUsdtRate: async () => ({ rate: 1.02, fetchedAt: now }),
+    localStorage: { setItem() {} }, render() {}, hyperliquidCoin, freshWhaleSnapshot,
+    recordWhaleHistory, whaleHistorySeries, escapeHtml: String, formatChartValue, formatCrosshairTime: String,
+    ...overrides
+  };
+  const names = ["whalePairs", "cancelUnusedWhaleRequest", "rememberWhaleSnapshot", "ensureWhaleContext",
+    "renderWhaleLayer", "renderChartLayerMenu"];
+  const api = runInNewContext(names.map(functionSource).join("\n") +
+    "\n({ensureWhaleContext, cancelUnusedWhaleRequest, renderWhaleLayer, renderChartLayerMenu});", globals);
+  return { globals, value, ...api };
+}
+
+test("whale context uses one complete shared query, stores FX-converted observations and reuses a fresh snapshot", async () => {
+  let calls = 0;
+  const harness = whaleHarness();
+  harness.globals.whaleClient.snapshot = async () => { calls++; return harness.value; };
+  await harness.ensureWhaleContext();
+  assert.equal(harness.globals.whaleState.status, "ok");
+  assert.equal(harness.globals.whaleHistory.coins.BTC[0].long, 102);
+  harness.globals.openVisualizations.add("ETH_USDT");
+  harness.globals.openTokens.add("ETH_USDT");
+  await harness.ensureWhaleContext();
+  assert.equal(calls, 1);
+  assert.equal(harness.globals.whaleHistory.coins.ETH[0].long, null);
+});
+
+test("closed/unsupported charts make no whale requests and obsolete cancelled results cannot restore lines", async () => {
+  const harness = whaleHarness({ openVisualizations: new Set(["AIOT_USDT"]), openTokens: new Set(["AIOT_USDT"]) });
+  harness.globals.whaleClient.snapshot = () => assert.fail("Unsupported/closed chart must not request cohort");
+  await harness.ensureWhaleContext();
+  harness.globals.openVisualizations = new Set(["BTC_USDT"]);
+  harness.globals.openTokens = new Set();
+  await harness.ensureWhaleContext();
+  let resolve;
+  harness.globals.openTokens.add("BTC_USDT");
+  harness.globals.whaleClient.snapshot = () => new Promise(done => { resolve = done; });
+  const pending = harness.ensureWhaleContext();
+  const signal = harness.globals.whaleRequest.controller.signal;
+  harness.globals.openVisualizations.clear();
+  harness.cancelUnusedWhaleRequest();
+  resolve(harness.value);
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(harness.globals.whaleState.snapshot, null);
+});
+
+test("failed whale/FX query publishes no lines and native details toggles cannot cause an immediate retry loop", async () => {
+  for (const fxFailure of [false, true]) {
+    let calls = 0;
+    const harness = whaleHarness();
+    harness.globals.whaleClient.snapshot = async () => {
+      calls++;
+      if (!fxFailure) throw new Error("Hyperliquid HTTP 451");
+      return harness.value;
+    };
+    if (fxFailure) harness.globals.fetchUsdcUsdtRate = async () => { throw new Error("FX unavailable"); };
+    await harness.ensureWhaleContext();
+    await harness.ensureWhaleContext();
+    assert.equal(calls, 1);
+    assert.equal(harness.globals.whaleState.status, "error");
+    assert.equal(harness.renderWhaleLayer("BTC_USDT", [1, 2], false).references.length, 0);
+  }
+});
+
+test("an invalid, future or expired FX quote cannot publish current or historical whale entries", async () => {
+  for (const fx of [{ rate: NaN, fetchedAt: 1792582000000 }, { rate: 1 },
+    { rate: 1, fetchedAt: 1792582030001 }, { rate: 1, fetchedAt: 1792581879999 }]) {
+    const harness = whaleHarness({ fetchUsdcUsdtRate: async () => fx });
+    await harness.ensureWhaleContext();
+    assert.equal(harness.globals.whaleState.status, "error");
+    assert.equal(harness.globals.whaleState.snapshot, null);
+    assert.deepEqual(Object.keys(harness.globals.whaleHistory.coins), []);
+  }
+});
+
+test("current references are correctly converted, explicit about time/source, and hidden in past or stale windows", async () => {
+  const harness = whaleHarness();
+  await harness.ensureWhaleContext();
+  const rendered = harness.renderWhaleLayer("BTC_USDT", [1, 2], false);
+  assert.equal(rendered.references[0].value, 102);
+  assert.equal(rendered.references[1].value, 112.2);
+  assert.equal(rendered.references[0].color, "#71A5D2");
+  assert.match(rendered.note, /НЕ історія/);
+  assert.match(rendered.note, /не Gate.io/);
+  assert.equal(harness.renderWhaleLayer("BTC_USDT", [1, 2], true).references.length, 0);
+  harness.globals.whaleState.fx.fetchedAt -= 120001;
+  assert.equal(harness.renderWhaleLayer("BTC_USDT", [1, 2], false).references.length, 0);
+  assert.match(harness.renderWhaleLayer("AIOT_USDT", [1, 2], false).note, /немає перевіреного зіставлення/);
+});
+
+test("history mode only plots actual sampled times and extends the latest domain without fabricating old entries", async () => {
+  const harness = whaleHarness();
+  await harness.ensureWhaleContext();
+  harness.globals.chartLayers.whaleMode = "history";
+  const time = harness.value.time;
+  const rendered = harness.renderWhaleLayer("BTC_USDT", [time - 1800, time - 900], false);
+  assert.equal(rendered.references.length, 0);
+  assert.deepEqual(Array.from(rendered.domainTimes), [time - 1800, time - 900, time]);
+  assert.deepEqual(rendered.series[0].times, [time]);
+  assert.deepEqual(rendered.series[0].values, [102]);
+  assert.equal(harness.renderWhaleLayer("BTC_USDT", [time - 1800, time - 900], true).series[0].times.length, 0);
+});
+
+test("indicator selector distinguishes actual Gate/HL layers from unavailable trader identities and reconstructed flows", () => {
+  const html = whaleHarness().renderChartLayerMenu("BTC_USDT");
+  assert.match(html, /data-chart-layer="whales"/);
+  assert.match(html, /Історія знімків цього пристрою/);
+  assert.match(html, /disabled><span>Команда токена/);
+  assert.match(html, /не правила SHORT/);
+});
+
+test("entry overlays have real axis labels and missing entries never become zero-priced dashed lines", () => {
+  const chart = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", { ...svgHelpers, escapeHtml: String });
+  const svg = chart([{ label: "Close", times: [100, 200], values: [100, 101], color: "#fff" }],
+    { label: "Ціна", priceChart: true, times: [100, 200], domainTimes: [100, 200],
+      references: [{ side: "long", value: 90, color: "#71A5D2" }, { side: "short", value: null }] });
+  assert.equal((svg.match(/data-whale-entry-line=/g) || []).length, 1);
+  assert.match(svg, /data-whale-entry-label="long"/);
+  assert.equal((svg.match(/class="chart-axis-value"/g) || []).length, 5);
+  assert.match(svg, /class="chart-axis-date"/);
+  assert.match(svg, /data-chart-readout/);
+  assert.doesNotMatch(svg, /NaN|Infinity/);
+});
 
 test("funding UI shows the exact normalized strategy rate alongside its raw source interval", function () {
   const formatFunding = runInNewContext(functionSource("formatFunding") + "\nformatFunding;", {
@@ -263,6 +405,7 @@ test("OI chart timeframe is independent and optional LONG/SHORT fields are descr
 
 test("SVG charts render both crosshair axes inside their plotted data bounds", function () {
   const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
+    ...svgHelpers,
     escapeHtml: function (value) { return String(value); }
   });
   const svg = chartSvg([
@@ -277,6 +420,7 @@ test("SVG charts render both crosshair axes inside their plotted data bounds", f
 
 test("only the primary close chart renders a right-side historical price label", function () {
   const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
+    ...svgHelpers,
     escapeHtml: function (value) { return String(value); }
   });
   const series = [{ values: [10, 20], color: "#fff", label: "Close", digits: 8, times: [100, 200] }];
@@ -296,6 +440,7 @@ test("only the primary close chart renders a right-side historical price label",
 
 test("primary price chart overlays a valid current ticker price without replacing candle history", function () {
   const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", {
+    ...svgHelpers,
     escapeHtml: function (value) { return String(value); },
     formatNumber: function (value) { return String(value); }
   });
@@ -388,6 +533,8 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
       VISUALIZATION_INTERVALS, OPEN_INTEREST_INTERVALS, AbortController, normalizeCandles: null,
       models: {}, buildOpenInterestSeries, buildIndicatorVisualization,
       chartWindows: {}, chartWindow, contextSeries, fundingHistory: {},
+      chartLayers: normalizeChartLayers(null), renderChartLayerMenu: () => "",
+      renderWhaleLayer: (_, times) => ({ domainTimes: times, references: [], series: [], note: "" }),
       renderMarketContext: function () { return ""; }, formatCrosshairTime: String, formatLevelPrice,
       selectedVisualizationInterval: function () { return "15m"; },
       selectedOpenInterestInterval: function () { return "5m"; },
@@ -725,7 +872,8 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
     openVisualizations: new Set(["Q_USDT"]), setOpenInterestInterval, setVisualizationInterval,
     removeVisualizationContract, removePair: function (pairs, pair) { return pairs.filter(function (value) { return value !== pair; }); },
     rankShortCandidates: function (pairs) { return pairs; }, renderTokenRow: function () { return ""; },
-    openTokens: new Set(), fundingHistory: {}, fundingRequests: {}, chartWindows: {},
+    openTokens: new Set(), openLayerMenus: new Set(), chartResizeObservers: [], cancelUnusedWhaleRequest: () => {},
+    fundingHistory: {}, fundingRequests: {}, chartWindows: {},
     cvdAnalysis: { mount: function () {} },
     savePairs: function () {}, saveVisualizationSelections: function () {}, saveOpenInterestSelections: function () {},
     ensureVisualizationData: function () { assert.fail("OI timeframe change must not fetch candles"); },
@@ -803,7 +951,7 @@ test("96 aligned five-minute snapshots produce two complete four-hour points and
   const history = Array.from({ length: 96 }, function (_, index) {
     return { time: start + index * 300, topLongOpenInterest: 100 + index, topShortOpenInterest: 200 + index };
   });
-  const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", { escapeHtml: String });
+  const chartSvg = runInNewContext(functionSource("chartSvg") + "\nchartSvg;", { ...svgHelpers, escapeHtml: String });
   const harness = visualizationHarness({
     Date: class extends Date { static now() { return now * 1000; } },
     selectedOpenInterestInterval: function () { return "4h"; },
