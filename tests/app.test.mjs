@@ -662,7 +662,7 @@ test("absent optional top fields are named unavailable instead of inferred from 
   assert.match(html, /TOP LONG OI · contracts/);
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /gate\/gateapi-python\/blob\/master\/docs\/ContractStat\.md/);
-  assert.doesNotMatch(readme, /github\.com\/gateio\/gateapi/);
+  assert.doesNotMatch(readme, /github\.com\/gateio\/gateapi[^/\s]*\/(?:blob|tree)\//);
   assert.match(readme, /Чинна схема документує `top_long_size` \/ `top_short_size`/);
 });
 

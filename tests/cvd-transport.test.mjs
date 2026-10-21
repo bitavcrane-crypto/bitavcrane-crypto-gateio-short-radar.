@@ -124,6 +124,62 @@ test("raw validation is strict, nondirectional and never fabricates IDs", () => 
   assert.equal(normalizeGateTradeFields({ ...raw(), create_time_ms: undefined }, "BTC_USDT", 1, "REST", START).fields.timestamp, START);
 });
 
+test("official public REST and WS schema shapes preserve magnitude but prove neither direction nor reconciliation", () => {
+  // Schema-shaped synthetic records, not a captured or verified cross-transport match.
+  // REST: gate/gateapi-python@759c91c/docs/FuturesTrade.md; WS: gate/gatews@12a935d/go/response_future.go.
+  const rest = { id: 101, create_time: START / 1000, create_time_ms: START,
+    contract: "BTC_USDT", size: "-2", price: "10" };
+  const ws = { id: 101, create_time: START / 1000, create_time_ms: START,
+    contract: "BTC_USDT", size: -2, price: "10" };
+  for (const [source, row] of [["REST", rest], ["WS", ws]]) {
+    const result = normalizeGateTrade(row, "BTC_USDT", "0.001", source, START);
+    assert.equal(result.fields.id, "101");
+    assert.equal(result.fields.signedSize, -2);
+    assert.equal(result.fields.quoteVolume, 0.02);
+    assert.equal(result.fields.source, source);
+    assert.equal(result.fields.timestamp, START);
+    assert.equal("direction" in result.fields, false);
+    assert.equal(result.trade, null);
+    assert.equal(result.state, "UNAVAILABLE");
+  }
+});
+
+test("neither order sign nor undocumented side or private maker role enables public aggressor CVD", () => {
+  for (const source of ["REST", "WS"]) {
+    for (const size of ["2", "-2", "0.25", "-0.25"]) {
+      for (const extra of [{}, { side: "buy" }, { side: "sell" },
+        { taker_side: "buy" }, { taker_side: "sell" }, { role: "maker" }, { role: "taker" }]) {
+        const result = normalizeGateTrade({ ...raw(), size, ...extra }, "BTC_USDT", 0.1, source, START);
+        assert.equal(result.fields.signedSize, Number(size));
+        assert.equal("direction" in result.fields, false);
+        assert.equal(result.trade, null);
+        assert.equal(result.state, "UNAVAILABLE");
+      }
+    }
+  }
+});
+
+test("apparently matching public REST and WS records cannot enter directional history while semantics are unverified", () => {
+  const store = createCvdStore();
+  const h = harness({ verified: false, store });
+  h.feed.subscribe("BTC_USDT", 0.1);
+  for (const source of ["WS", "REST", "WS", "REST"]) {
+    const result = normalizeGateTrade(raw("BTC_USDT", "101"), "BTC_USDT", 0.1, source, START);
+    assert.equal(result.trade, null);
+  }
+  const snapshot = store.snapshot("BTC_USDT", START);
+  assert.equal(snapshot.state, "UNAVAILABLE");
+  assert.equal(snapshot.retainedIds, 0);
+  assert.equal(snapshot.lastTradeAt, null);
+  for (const frame of Object.values(snapshot.frames)) {
+    assert.equal(frame.cvd, null);
+    assert.equal(frame.divergence.status, "INSUFFICIENT_DATA");
+  }
+  assert.equal(h.sockets.length, 0);
+  assert.equal(h.requests.length, 0);
+  h.feed.dispose();
+});
+
 test("unverified subscriptions expose the direction limitation before multiplier metadata arrives", () => {
   const store = createCvdStore();
   const h = harness({ verified: false, store });
@@ -238,7 +294,7 @@ test("disconnect immediately resets coverage, reconnects once, and ignores stale
   h.feed.dispose();
 });
 
-test("real store deduplicates WS/REST, accepts out-of-order trades, never stitches a reconnect gap", async () => {
+test("injected verified fixture adapter deduplicates synthetic WS/REST IDs without asserting Gate compatibility", async () => {
   const store = createCvdStore();
   let rows = [raw()];
   const h = harness({ store, fetchImpl: async () => ({ ok: true, json: async () => rows }) });
