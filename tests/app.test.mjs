@@ -615,6 +615,7 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
     openVisualizations: new Set(["Q_USDT"]), setOpenInterestInterval, setVisualizationInterval,
     removeVisualizationContract, removePair: function (pairs, pair) { return pairs.filter(function (value) { return value !== pair; }); },
     sortPairsBySignal: function (pairs) { return pairs; }, renderCard: function () { return ""; },
+    cvdAnalysis: { mount: function () {} },
     savePairs: function () {}, saveVisualizationSelections: function () {}, saveOpenInterestSelections: function () {},
     ensureVisualizationData: function () { assert.fail("OI timeframe change must not fetch candles"); },
     cardsNode: { querySelectorAll: function (selector) {

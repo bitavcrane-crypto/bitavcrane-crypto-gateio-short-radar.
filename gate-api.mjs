@@ -247,3 +247,336 @@ export function normalizeContractStats(rows, nowSeconds) {
 export function clearCache() {
   cache.clear();
 }
+
+export const GATE_CVD_SEMANTICS = Object.freeze({
+  verified: false,
+  reason: "Офіційні доступні документи Gate.io не підтверджують напрям агресора за знаком size; CVD недоступний."
+});
+
+function cvdNumber(value) {
+  if (typeof value === "string" && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// Validates magnitude and provenance only: signed size is NOT an aggressor direction.
+export function normalizeGateTradeFields(row, contract, multiplier, source, now = Date.now()) {
+  const invalid = reason => ({ fields: null, state: "UNAVAILABLE", reason, source });
+  if (!row || typeof row !== "object" || Array.isArray(row) || row.contract !== contract ||
+      !["WS", "REST"].includes(source) || !Number.isFinite(now)) {
+    return invalid("Некоректні дані або джерело угоди Gate.io.");
+  }
+  if (row.is_internal === true) return invalid("Внутрішню угоду виключено з CVD.");
+  const id = row.id;
+  if (!(typeof id === "string" && /^\d+$/.test(id)) &&
+      !(typeof id === "number" && Number.isSafeInteger(id) && id >= 0)) {
+    return invalid("Відсутній безпечний ідентифікатор угоди Gate.io.");
+  }
+  const price = cvdNumber(row.price);
+  const signedSize = cvdNumber(row.size);
+  const factor = cvdNumber(multiplier);
+  const milliseconds = row.create_time_ms === undefined ? null : cvdNumber(row.create_time_ms);
+  const seconds = row.create_time === undefined ? null : cvdNumber(row.create_time);
+  if ((row.create_time_ms !== undefined && milliseconds === null) ||
+      (row.create_time !== undefined && seconds === null) ||
+      (milliseconds !== null && seconds !== null && Math.abs(milliseconds - seconds * 1000) > 1000)) {
+    return invalid("Суперечливий час угоди Gate.io.");
+  }
+  const timestamp = milliseconds ?? (seconds === null ? null : seconds * 1000);
+  const quoteVolume = Math.abs(signedSize) * price * factor;
+  if (price === null || price <= 0 || signedSize === null || signedSize === 0 ||
+      factor === null || factor <= 0 || timestamp === null || timestamp <= 0 ||
+      !Number.isFinite(timestamp) || timestamp > now + 5000 ||
+      !Number.isFinite(quoteVolume) || quoteVolume <= 0) {
+    return invalid("Некоректні числові поля угоди Gate.io.");
+  }
+  return {
+    fields: { id: String(id), contract, timestamp, price, signedSize, multiplier: factor, quoteVolume, source },
+    state: "UNAVAILABLE", reason: GATE_CVD_SEMANTICS.reason, source
+  };
+}
+
+export function normalizeGateTrade(row, contract, multiplier, source, now = Date.now()) {
+  const result = normalizeGateTradeFields(row, contract, multiplier, source, now);
+  return { ...result, trade: null, state: "UNAVAILABLE",
+    reason: GATE_CVD_SEMANTICS.reason, validationReason: result.fields ? null : result.reason };
+}
+
+// Adapter injection supports transport tests/future officially verified semantics, not a UI override.
+export function createGateTradeFeed({
+  store, WebSocketImpl = globalThis.WebSocket, fetchImpl = globalThis.fetch,
+  now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
+  setEvery = setInterval, clearEvery = clearInterval,
+  normalizeTrade = normalizeGateTrade, semantics = GATE_CVD_SEMANTICS, onChange = () => {}
+}) {
+  const entries = new Map();
+  let socket = null;
+  let detach = () => {};
+  let disposed = false;
+  let reconnectTimer = null;
+  let handshakeTimer = null;
+  let ackTimer = null;
+  let heartbeat = null;
+  let retry = 1000;
+  let sequence = 0;
+  let pending = [];
+  let snapshots = [];
+  let fetching = false;
+  let lastMessage = 0;
+  const verified = semantics?.verified === true && normalizeTrade !== normalizeGateTrade;
+
+  function notify(contract) {
+    try { onChange(contract); } catch { /* Rendering errors must not interrupt transport cleanup. */ }
+  }
+  function status(entry, state, reason) {
+    store.status(entry.contract, state, reason);
+    if (entry.state === state && entry.reason === reason) return;
+    entry.state = state;
+    entry.reason = reason;
+    notify(entry.contract);
+  }
+  function cancelSnapshot(entry) {
+    entry.controller?.abort();
+    entry.controller = null;
+    snapshots = snapshots.filter(item => item.entry !== entry);
+  }
+  function current(entry) {
+    return !disposed && entries.get(entry.contract) === entry;
+  }
+  function stopSocket() {
+    const old = socket;
+    socket = null;
+    detach();
+    detach = () => {};
+    if (heartbeat !== null) clearEvery(heartbeat);
+    heartbeat = null;
+    if (handshakeTimer !== null) clearTimer(handshakeTimer);
+    handshakeTimer = null;
+    if (ackTimer !== null) clearTimer(ackTimer);
+    ackTimer = null;
+    pending = [];
+    try { old?.close(); } catch { /* Already closed. */ }
+  }
+  function scheduleReconnect() {
+    if (disposed || !entries.size || reconnectTimer !== null) return;
+    reconnectTimer = setTimer(() => {
+      reconnectTimer = null;
+      connect();
+    }, retry);
+    retry = Math.min(30000, retry * 2);
+  }
+  function disconnected(reason) {
+    stopSocket();
+    for (const entry of entries.values()) {
+      entry.live = false;
+      cancelSnapshot(entry);
+      store.resetCoverage(entry.contract, now(), reason);
+      status(entry, "DELAYED", reason);
+    }
+    scheduleReconnect();
+  }
+  function armAckTimeout() {
+    if (ackTimer !== null) clearTimer(ackTimer);
+    ackTimer = null;
+    if (!pending.length) return;
+    const connection = socket;
+    ackTimer = setTimer(() => {
+      ackTimer = null;
+      if (!disposed && socket === connection && pending.length) {
+        disconnected("Gate.io не підтвердив підписку за 15 секунд; покриття скинуто.");
+      }
+    }, Math.max(0, pending[0].deadline - now()));
+  }
+  function sendSubscription(entry) {
+    if (!socket || socket.readyState !== 1 || entry.requested) return;
+    const id = ++sequence;
+    const batch = { id, entries: [entry], deadline: now() + 15000 };
+    pending.push(batch);
+    if (pending.length === 1) armAckTimeout();
+    entry.requested = true;
+    socket.send(JSON.stringify({
+      id, time: Math.floor(now() / 1000), channel: "futures.trades",
+      event: "subscribe", payload: [entry.contract]
+    }));
+  }
+  function ingestRows(entry, rows, source) {
+    for (const row of rows) {
+      if (!current(entry) || !entry.live) return;
+      const normalized = normalizeTrade(row, entry.contract, entry.multiplier, source, now());
+      if (normalized?.trade) store.ingest(normalized.trade, now());
+      else {
+        store.resetCoverage(entry.contract, now(), "Непідтверджена угода: попереднє покриття скинуто.");
+        status(entry, "UNAVAILABLE", normalized?.reason || "Некоректна угода Gate.io.");
+      }
+    }
+  }
+  async function drainSnapshots() {
+    if (fetching || disposed) return;
+    fetching = true;
+    try {
+      while (snapshots.length && !disposed) {
+        const { entry, session } = snapshots.shift();
+        if (!current(entry) || !entry.live || entry.session !== session) continue;
+        const controller = new AbortController();
+        entry.controller = controller;
+        const timeout = setTimer(() => controller.abort(), 15000);
+        try {
+          const response = await fetchImpl(API_ROOT + "/futures/usdt/trades?contract=" +
+            encodeURIComponent(entry.contract) + "&limit=1000", {
+            headers: { Accept: "application/json" }, signal: controller.signal
+          });
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          const rows = await response.json();
+          if (!Array.isArray(rows) || rows.length > 1000) throw new Error("Некоректний список угод");
+          if (!controller.signal.aborted && current(entry) && entry.session === session) {
+            // Pre-anchor history cannot establish interval coverage; the store rejects it.
+            ingestRows(entry, rows, "REST");
+          }
+        } catch {
+          if (!controller.signal.aborted && current(entry) && entry.session === session) {
+            status(entry, "DELAYED", "Не вдалося отримати обмежений знімок угод Gate.io.");
+          }
+        } finally {
+          clearTimer(timeout);
+          if (entry.controller === controller) entry.controller = null;
+        }
+      }
+    } finally {
+      fetching = false;
+    }
+  }
+  function acknowledge(frame) {
+    const index = frame.id === undefined ? 0 : pending.findIndex(batch => batch.id === frame.id);
+    if (index < 0 || !pending.length) return;
+    const [batch] = pending.splice(index, 1);
+    armAckTimeout();
+    if (frame.error || frame.result?.status !== "success") {
+      disconnected("Gate.io відхилив підписку на угоди.");
+      return;
+    }
+    retry = 1000;
+    for (const entry of batch.entries) {
+      if (!current(entry)) continue;
+      entry.live = true;
+      entry.session += 1;
+      store.resetCoverage(entry.contract, now(), "Новий сеанс: історія до підтвердження не забезпечує покриття.");
+      status(entry, "AVAILABLE", "Підписку на публічні угоди підтверджено.");
+      snapshots.push({ entry, session: entry.session });
+    }
+    void drainSnapshots();
+  }
+  function message(event) {
+    lastMessage = now();
+    const frame = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+    if (!frame || typeof frame !== "object" || Array.isArray(frame)) throw new Error("Invalid frame");
+    if (frame.channel === "futures.trades" && frame.event === "subscribe") {
+      acknowledge(frame);
+      return;
+    }
+    if (frame.error) throw new Error("Gate.io error");
+    if (frame.channel !== "futures.trades" || frame.event !== "update") return;
+    if (!Array.isArray(frame.result)) throw new Error("Invalid trades");
+    for (const row of frame.result) {
+      if (!row || typeof row.contract !== "string") throw new Error("Invalid contract");
+      const entry = entries.get(row.contract);
+      if (entry?.live) ingestRows(entry, [row], "WS");
+    }
+  }
+  function connect() {
+    if (disposed || socket || !entries.size || !verified) return;
+    for (const entry of entries.values()) entry.requested = false;
+    try {
+      const connection = new WebSocketImpl("wss://fx-ws.gateio.ws/v4/ws/usdt");
+      socket = connection;
+      lastMessage = now();
+      const guard = callback => event => {
+        if (disposed || socket !== connection) return;
+        try { callback(event); } catch {
+          disconnected("Некоректні дані або помилка з’єднання Gate.io; покриття скинуто.");
+        }
+      };
+      const handlers = {
+        open: guard(() => {
+          if (handshakeTimer !== null) clearTimer(handshakeTimer);
+          handshakeTimer = null;
+          lastMessage = now();
+          for (const entry of entries.values()) sendSubscription(entry);
+        }),
+        message: guard(message),
+        close: guard(() => disconnected("З’єднання Gate.io перервано; новий сеанс без непідтверджених проміжків.")),
+        error: guard(() => disconnected("Помилка WebSocket Gate.io; покриття скинуто."))
+      };
+      for (const [name, handler] of Object.entries(handlers)) connection.addEventListener(name, handler);
+      detach = () => {
+        for (const [name, handler] of Object.entries(handlers)) connection.removeEventListener(name, handler);
+      };
+      handshakeTimer = setTimer(guard(() => {
+        handshakeTimer = null;
+        disconnected("З’єднання Gate.io не відкрилося за 15 секунд; покриття скинуто.");
+      }), 15000);
+      heartbeat = setEvery(guard(() => {
+        if (now() - lastMessage >= 45000) {
+          disconnected("Немає повідомлень Gate.io понад 45 секунд; покриття скинуто.");
+          return;
+        }
+        if (connection.readyState === 1) {
+          connection.send(JSON.stringify({ time: Math.floor(now() / 1000), channel: "futures.ping" }));
+        }
+      }), 15000);
+    } catch {
+      disconnected("Не вдалося відкрити публічне з’єднання Gate.io.");
+    }
+  }
+  function subscribe(contract, multiplier) {
+    if (disposed || entries.has(contract)) return false;
+    const factor = cvdNumber(multiplier);
+    if (typeof contract !== "string" || !contract.trim()) return false;
+    if (verified && (factor === null || factor <= 0)) return false;
+    multiplier = factor !== null && factor > 0 ? factor : null;
+    const entry = { contract, multiplier, live: false, requested: false, session: 0, controller: null };
+    entries.set(contract, entry);
+    store.addContract(contract, { startedAt: now(), multiplier });
+    if (!verified) {
+      status(entry, "UNAVAILABLE", GATE_CVD_SEMANTICS.reason);
+      return true;
+    }
+    status(entry, "LOADING", "Очікування підтвердження підписки Gate.io.");
+    connect();
+    try { sendSubscription(entry); } catch { disconnected("Помилка підписки Gate.io."); }
+    return true;
+  }
+  function unsubscribe(contract) {
+    const entry = entries.get(contract);
+    if (!entry) return false;
+    entries.delete(contract);
+    cancelSnapshot(entry);
+    store.removeContract(contract);
+    // Keep pending batches as tombstones: a late id-less ACK still belongs to its original request.
+    for (const batch of pending) batch.entries = batch.entries.filter(item => item !== entry);
+    if (!entries.size) {
+      if (reconnectTimer !== null) clearTimer(reconnectTimer);
+      reconnectTimer = null;
+      stopSocket();
+      retry = 1000;
+    } else if (socket?.readyState === 1 && entry.requested) {
+      try {
+        socket.send(JSON.stringify({ time: Math.floor(now() / 1000), channel: "futures.trades",
+          event: "unsubscribe", payload: [contract] }));
+      } catch { disconnected("Помилка відписки Gate.io."); }
+    }
+    notify(contract);
+    return true;
+  }
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    for (const contract of [...entries.keys()]) unsubscribe(contract);
+    if (reconnectTimer !== null) clearTimer(reconnectTimer);
+    reconnectTimer = null;
+    stopSocket();
+  }
+  return { subscribe, unsubscribe, dispose,
+    status: () => ({ activeContracts: entries.size, connected: Boolean(socket?.readyState === 1),
+      pendingSubscriptions: pending.length, disposed }) };
+}

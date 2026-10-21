@@ -3,6 +3,7 @@ import { fetchCandles, fetchContracts, fetchContractStats, fetchOrderBook, fetch
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
+import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
 import {
   getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
@@ -52,6 +53,12 @@ let visualizationCrosshairTimes = {};
 let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
 let lastSuccessfulUpdate = null;
+const cvdAnalysis = createCvdAnalysis({
+  chart: chartSvg,
+  getMultiplier: function (contract) {
+    return contracts.find(function (item) { return item.name === contract; })?.quantoMultiplier;
+  }
+});
 
 function loadConfirmationSettings() {
   try {
@@ -910,6 +917,7 @@ function render() {
       render();
     });
   });
+  cvdAnalysis.mount(cardsNode, pairs);
 }
 
 async function ensureVisualizationData(contract, interval) {
@@ -1368,3 +1376,5 @@ syncVisualizationControls();
 render();
 scan();
 window.setInterval(scan, POLL_MS);
+window.addEventListener("pagehide", function () { cvdAnalysis.dispose(); });
+window.addEventListener("pageshow", function () { cvdAnalysis.mount(cardsNode, pairs); });
