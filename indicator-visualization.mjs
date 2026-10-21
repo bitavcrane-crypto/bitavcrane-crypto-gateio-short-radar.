@@ -108,11 +108,9 @@ function lastFinite(values, offset) {
   return null;
 }
 
-function tail(values) {
-  return values.slice(-48);
-}
-
-export function buildIndicatorVisualization(candles, settings, nowSeconds, intervalSeconds) {
+export function buildIndicatorVisualization(candles, settings, nowSeconds, intervalSeconds, maxPoints = 48) {
+  const pointLimit = Number.isInteger(maxPoints) && maxPoints >= 24 && maxPoints <= 600 ? maxPoints : 48;
+  const tail = values => values.slice(-pointLimit);
   const seconds = Number.isFinite(intervalSeconds) && intervalSeconds > 0 ? intervalSeconds : 900;
   const byTime = new Map();
   if (Array.isArray(candles)) {

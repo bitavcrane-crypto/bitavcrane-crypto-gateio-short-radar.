@@ -100,6 +100,10 @@ export function renderCvdSnapshot(snapshot, selected = "15m", chart, sourceLabel
   }
   return '<p class="cvd-status" role="status">' + escape(state) + " · " + escape(STATE_LABELS[state] || state) +
     " · " + escape(reason(snapshot?.reason) || "Очікуємо перевірені дані угод.") + '</p>' +
+    '<p class="quality-note"><strong>Якщо дані не надходять:</strong> доступ до Binance може бути обмежений у вашому регіоні. ' +
+    'Це не підтверджується самим порожнім графіком: після нового підключення також потрібен прогрів — два повністю покриті ' +
+    '15m інтервали для лінії CVD, щонайменше дев’ять для перевірки дивергенції. Звичайні графіки ціни, обсягу, OI та funding нижче/вище працюють із Gate.io незалежно від CVD. ' +
+    'Немає даних CVD — немає висновку CVD; нулі не підставляються.</p>' +
     '<p class="quality-note">Джерело: ' + escape(sourceLabel) +
     ' · Binance агрегує угоди з однаковою ціною та стороною приблизно за 100 мс; RPI-угоди не мають окремої позначки.</p>' +
     '<p class="quality-note">Остання угода: ' + escape(timestamp(snapshot?.lastTradeAt)) +
@@ -219,8 +223,8 @@ export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdSto
         }
         const expanded = open.has(contract);
         host.innerHTML = '<button type="button" class="visualization-toggle" data-cvd-toggle="' + escape(contract) +
-          '" aria-expanded="' + expanded + '">CVD Binance / Графік</button>' +
-          '<p class="quality-note">Публічний потік Binance USDⓈ-M, не потік Gate.io · лише контекстний аналіз · не впливає на PUMP / EXHAUSTION / SHORT та торгові рівні.</p>' +
+          '" aria-expanded="' + expanded + '">CVD Binance · окреме джерело</button>' +
+          '<p class="cvd-source-hint">Необов’язковий контекст Binance, не потік Gate.io. При регіональному обмеженні основний радар Gate.io працює без нього.</p>' +
           '<div data-cvd-content' + (expanded ? "" : " hidden") + "></div>";
         hosts.set(contract, host);
         if (expanded) {

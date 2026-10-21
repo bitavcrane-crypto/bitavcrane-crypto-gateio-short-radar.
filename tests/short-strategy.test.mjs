@@ -47,6 +47,36 @@ function validInput() {
   };
 }
 
+test("a closed-candle reference cannot remain an entry after price reaches stop or TP1", () => {
+  for (const price of [100.3, 101, 91.3, 90]) {
+    const input = validInput();
+    input.ticker.last = price;
+    const result = evaluateShortStrategy(input);
+    assert.equal(result.allowed, false);
+    assert.equal(result.liveRiskReward, null);
+    assert.ok(result.blockers.some(reason => /вже досягла/.test(reason)));
+  }
+});
+
+test("blocks a late short whose current-price reward/risk no longer meets the minimum", () => {
+  const input = validInput();
+  input.ticker.last = 92;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.riskReward, 2);
+  assert.ok(result.liveRiskReward < 1.5);
+  assert.equal(result.allowed, false);
+  assert.ok(result.blockers.some(reason => /поточна ціна/.test(reason)));
+});
+
+test("current-price net risk includes fees and slippage on both sides", () => {
+  const input = validInput();
+  input.takerFeeRate = 0.0005;
+  const result = evaluateShortStrategy(input);
+  assert.equal(result.allowed, true);
+  assert.ok(result.liveNetRiskReward < result.liveRiskReward);
+  assert.equal(result.liveNetRiskReward, result.netRiskReward);
+});
+
 test("classifies all four Price × OI combinations and neutral/missing data", function () {
   assert.equal(classifyPriceOi(1, 2).key, "up_up");
   assert.equal(classifyPriceOi(1, -2).key, "up_down");
