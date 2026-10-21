@@ -8,6 +8,163 @@
 
 Початковий ручний список: `BTC_USDT`, `ETH_USDT`, `SOL_USDT`. Автоскан що хвилини переглядає тикери активних USDT perpetual і тимчасово аналізує до 12 контрактів, для яких API надав зміну за 24 години щонайменше `5%` і quote-обсяг щонайменше `250,000 USDT`. Це лише попередній фільтр кандидатів, не сигнал і не ранжування готових SHORT: фінальне сортування використовує повні оцінки моделі. Якщо будь-яке з потрібних числових полів відсутнє або некоректне, контракт не додається автоматично. Картки позначають автоматично знайдені пари; ✕ прибирає пару з поточного списку та приховує автоматичну пару, доки вона знову не вийде з попереднього фільтра. Щоб додати пару вручну, введіть точний символ (наприклад, `RAVE_USDT`) і натисніть «Додати пару». Ручна пара додається тільки якщо присутня серед активних контрактів USDT Gate.io; ручний список зберігається у `localStorage`, а автоматичні кандидати — ні.
 
+## CVD V1 · лише аналіз · перевірка напрямку заблокована
+
+Кнопка **«CVD / Графік»** під кожною парою відкриває незалежний аналіз 15m / 1h / 4h.
+Модуль не передає даних у PUMP, EXHAUSTION, SHORT, entry, invalidation, stop або TP.
+Старі ключі та формати `localStorage` не змінюються; окремі угоди не зберігаються.
+
+**Незавершений критерій приймання:** у цьому середовищі офіційний сайт документації
+Gate недоступний через DNS. Чинні офіційні SDK підтверджують поля публічних угод, але
+не пояснюють, чий напрямок позначає знак `size`. Тому production-адаптер має
+`GATE_CVD_SEMANTICS.verified = false`: показує `UNAVAILABLE` з українською причиною,
+не вгадує taker-side за знаком, ціною, tick rule або непідтвердженим `side`, і не запускає
+марний транспорт. Користувацького обходу перевірки немає. До підтвердження офіційної
+семантики live-напрямок CVD та live-дивергенції **не доступні**.
+Перевірені нормалізовані fixtures тестують обчислювальний модуль і транспорт окремо.
+
+Джерела, перевірені 2026-10-21:
+
+- [Офіційний WS SDK: поля `FuturesTrade`](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/go/response_future.go#L35-L48):
+  `id`, `create_time`, `create_time_ms`, `contract`, `size`, `price`; поле `taker_side` у цій схемі не визначене.
+- [Офіційний REST SDK: `FuturesTrade`](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesTrade.md):
+  `size` — рядок; схема не визначає семантику taker-side.
+- [Пояснення maintainera про час](https://github.com/gateio/gatews/issues/39#issuecomment-1244787869):
+  `create_time_ms` — час рушія в мілісекундах; не час отримання повідомлення.
+- [Офіційна схема контракту](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/Contract.md):
+  `quanto_multiplier` задає одиниці базового активу на контракт.
+- Цільова [офіційна документація WS](https://www.gate.com/docs/developers/futures/ws/en/):
+  перед увімкненням адаптера потрібне пряме підтвердження напряму агресора.
+
+### Повторна перевірка PR #18: що доведено, а що ні
+
+Перевірка 2026-10-21 залишає production-напрямок **не доведеним**. Прямий доступ до
+[REST specification](https://www.gate.com/docs/developers/apiv4/en/#futures-market-transaction-records)
+та WS specification вище знову завершився помилкою DNS. Тому наведені нижче висновки
+стосуються доступних офіційних схем/вихідного коду, а не прочитаної актуальної
+вебспецифікації. Перевірені HEAD офіційних SDK: REST `759c91c06face05c0610b4a62661f7e23172d9cb`
+(2026-10-20) і WS `12a935d30cdadad13696d70968e254b53437a2f6` (2026-09-01).
+
+| Офіційне джерело | Точне визначення / факт | Межа доказу |
+| --- | --- | --- |
+| [REST `list_futures_trades`, generated source](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/gate_api/api/futures_api.py#L814-L842) | `"Futures market transaction records"`; повертає `list[gate_api.FuturesTrade]`. `last_id`: `"This parameter is deprecated. Use from and to instead to limit time range"` | Метод не визначає агресора, спільний WS ID або гарантію повноти. |
+| [REST endpoint list](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesApi.md) | `GET /futures/{settle}/trades`; для цього модуля `settle=usdt` | Це public trade endpoint, не endpoint ордерів чи приватних виконань. |
+| [REST `FuturesTrade` schema](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesTrade.md) | `id`: `"Fill ID"`; `size`: `"Trading size"` (string); `price`: `"Trade price (quote currency)"` | Немає пояснення знака `size`, поля aggressor/maker або посилання на спільний з WS простір ID. |
+| [WS `FuturesTrade` source](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/go/response_future.go#L35-L48) | `Id int64`: `"Trade ID"`; `Size int64`: `"Trading size"`; `Price string`: `"Trading price"` | Однакові назви полів не доводять однакові записи, одиниці, знак чи напрямок taker. |
+| [WS constants](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/go/constant.go) | `FuturesUsdtUrl = "wss://fx-ws.gateio.ws/v4/ws/usdt"`; `ChannelFutureTrade = "futures.trades"` | Підтверджує адресу/канал, не напрямок виконання. |
+| [Офіційна WS SBE schema, `publicTrade`](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/sbe/schemas/prod/gate_fex_ws_latest.xml) | `size`, `type="int64"`, `description="Trade size"` | Додаткова maintained schema також не визначає агресорний знак. Це інший encoding, не JSON payload, який можна підставити в наявний адаптер. |
+| [Відповідь Gate collaborator у REST SDK issue #17](https://github.com/gateio/gateapi-go/issues/17#issuecomment-899063663), 2021-08-15 | На питання maker чи taker для посилання `#futures-trading-history`: **`"taker side"`** | Це корисне офіційне історичне свідчення про сторону REST history. Воно не визначає знак public `size`, не згадує WS і не гарантує сумісність транспортів. |
+| [Order schema, не public trade](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesOrder.md) | `size`: `"Required. Trading quantity. Positive for buy, negative for sell. Set to 0 for close position orders."` | Це напрямок **ордера**; його не можна переносити на public executed trade та називати агресором. |
+| [Private `MyFuturesTrade` schema](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/MyFuturesTrade.md) | `role`: `"Trade role. taker - taker, maker - maker"`; `order_id`: `"Related order ID"` | Роль стосується приватного виконання учасника. Public `FuturesTrade` такої ролі не документує. |
+| [Contract schema](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/Contract.md) | `type`: `"inverse - inverse contract, direct - direct contract"`; `quanto_multiplier`: `"The contract multiplier indicates how many units of the underlying asset the face value of one contract represents."` | Для **direct** USDT-контракту: базовий обсяг = `abs(size) × multiplier`, quote notional = базовий обсяг × ціна. Це не універсальна формула для inverse/quanto. |
+
+Контрактний `enable_decimal` у цій схемі окремо описує підтримку decimal lot size.
+REST-схема має string `size`, тоді як перевірений WS Go model має `int64`; сам SDK не
+доводить повну сумісність поточного wire-format для кожного контракту. Точний додатний
+`quanto_multiplier` потрібен **для конкретного контракту**; відсутній множник не можна
+замінювати одиницею. Згадана формула визначає величину notional, але не агресорний знак.
+Історичні приклади multiplier не є поточною метаданою: Gate collaborator пояснив
+`"It means 1 size = 0.0001 BTC"` у [BTC_USDT прикладі 2021 року](https://github.com/gateio/gateapi-python/issues/53#issuecomment-849566362);
+це ілюстрація одиниць, не дозвіл hard-code цього множника.
+
+Окрему актуальну офіційну OpenAPI YAML/JSON специфікацію, яка закриває ці питання,
+під час перевірки не знайдено. У [відповіді Gate collaborator про generating specification](https://github.com/gateio/gateapi-python/issues/150#issuecomment-1536297367)
+2023-05-05 сказано: `"Sorry we currently don't offer that directly and it's not planned in recent time."`
+Це лише історична відповідь, **не** доказ, що специфікації сьогодні не існує.
+Поєднання REST `"taker side"` із **order** sign convention лишається припущенням,
+а не прямою дефініцією public-trade агресорного знака.
+
+**REST ↔ WS reconciliation наразі не доведений.** Визначення `"Fill ID"` і `"Trade ID"`
+не встановлюють спільний простір ID, тотожність одиниць/знака, гранулярність виконань
+або поведінку внутрішніх/спеціальних угод. Не доведено, що один WS запис завжди
+відповідає рівно одному REST запису. Не можна вважати лише збіг ID достатнім доказом
+для production-дедуплікації між джерелами. Існуючі тести зі спільними синтетичними ID
+доводять механіку store/transport **за припущенням ін'єктованого тестового адаптера**,
+не сумісність біржі. Нові schema-shaped fixtures також синтетичні, не live-capture.
+
+**Чому read-only спостереження не знімає блокер.** Public GET для `BTC_USDT`, `limit=2`,
+на `https://api.gateio.ws/api/v4/futures/usdt/trades` і офіційному альтернативному
+[futures REST host](https://github.com/gateio/rest-v4/blob/master/README.md#access-url)
+`https://fx-api.gateio.ws/api/v4/futures/usdt/trades` завершилися DNS error (`curl` exit 6,
+HTTP 000): live-вибірки та WS/REST overlap не отримані. Ордерів, автентифікації та
+дій з акаунтом не було. Навіть доступна вибірка корельованих цін/розмірів не визначає
+агресора незалежно. Зміни public order book можуть включати скасування, приховану
+ліквідність і гонки повідомлень; близькість ціни до bid/ask або tick movement — не
+незалежний ground truth. Співпадіння REST/WS записів саме по собі також не визначає taker.
+Приватне виконання з роллю не запитується для цього public-only, read-only дослідження.
+
+**Що залишається потрібним перед увімкненням:** пряма офіційна дефініція, чию сторону
+представляє signed `size` **у public виконанні**, для REST і WS; офіційна гарантія
+або незалежно перевірене обґрунтування спільних ID/гранулярності/величин, знака та
+винятків; перевірка direct USDT contract metadata й фактичних типів payload.
+Якщо офіційний опис лишається неоднозначним, потрібен офіційний read-only ground-truth
+механізм, який ідентифікує aggressor без висновку з ціни або власних ордерів.
+До цього адаптер **не змінений**: `trade: null`, `UNAVAILABLE`, жодного напрямного
+CVD/дивергенцій або UI bypass. Додані тести підтверджують це для REST/WS, обох знаків,
+decimal величин та непідтверджених `side`, `taker_side`, `role`.
+
+### Формули, вікна та підтвердження
+
+`cvd.mjs` приймає нормалізовані угоди
+`{contract, id, timestamp, price, quantity, quoteVolume, direction, source, quality}`:
+UTC epoch milliseconds; додатні ціна, абсолютна кількість контрактів і notional;
+`direction = BUY | SELL`, `quality = VERIFIED`. Відсутні/небезпечні ID, нульові,
+нечислові, невалідні або майбутні значення не стають угодами.
+Обсяги — **USDT**: `quoteVolume = abs(size) × quanto_multiplier × price`,
+не суміш контрактів і notional.
+
+`Δ = BUY − SELL`; CVD — накопичена signed USDT сума з явного початку неперервної
+сесії. 15m / 1h / 4h — незалежні завершені UTC-вікна
+`floor(timestamp / interval) × interval`, не довільні rolling-вікна.
+Зміна CVD за інтервал = Δ; нахил = Δ / тривалість у хвилинах;
+нормалізована зміна/дисбаланс = Δ / (BUY + SELL), за нульового знаменника — `null`.
+Зміна ціни = `(close / open − 1) × 100` за ті самі угоди інтервалу.
+Сесійні CVD порівнюються лише зі спільним початком і відповідним часом завершення.
+Неповна початкова свічка та пропуски не вважаються повним покриттям і не дають
+напрямного висновку. Поточний попередній інтервал у snapshot відокремлений від закритих.
+
+Строгий price-півот має по 2 завершені сусідні свічки зліва/справа;
+відповідний екстремум CVD має бути на тому самому інтервалі та підтверджений
+сусідами. Порівнюються останні два відповідні півоти: вищий price-high і нижчий
+CVD-high → BEARISH; нижчий price-low і вищий CVD-low → BULLISH.
+Потрібно щонайменше 9 послідовних повністю покритих інтервалів, по 2 угоди
+на інтервал і щонайменше 20 загалом. Незакриті/непідтверджені півоти не створюють
+підтвердженої дивергенції. Результат містить timeframe, час півотів, час підтвердження
+та reason codes; недостатні дані → `INSUFFICIENT_DATA`. Негативна Δ не є дивергенцією.
+
+### Ресурси, свіжість та обмеження
+
+Адаптер у `gate-api.mjs` підготовлений для одного спільного
+`wss://fx-ws.gateio.ws/v4/ws/usdt`, public `futures.trades`, та обмеженого
+`GET /api/v4/futures/usdt/trades?contract=…&limit=1000` без ключів.
+Після підтвердження семантики він обслуговуватиме лише розгорнуті CVD-секції,
+з дедуплікацією за ID, ACK підписки, heartbeat, bounded reconnect і послідовним REST
+відновленням. REST-знімок обмежений і **не доводить повноту** попередньої історії.
+Reconnect починає нову сесію, а не зшиває невідомий пропуск. Повна 4h історія
+і дивергенції потребують тривалого неперервного спостереження; після collapse/reload
+прогрів починається заново. Ліміти на контракт: 20 000 ID, 72 години сесії
+та 64 інтервали на таймфрейм; переповнення скидає сесію замість втрати гарантії
+дедуплікації. На дуже активних ринках ліміт ID може перезапустити прогрів раніше,
+ніж з'явиться повна 4h свічка або історія для дивергенції.
+Collapse, видалення ручної/автоматичної пари та `pagehide` прибирають CVD-ресурси.
+Один таймер оновлює лише CVD DOM, не запускаючи повторне обчислення стратегії.
+Графіки використовують наявний SVG-renderer, синхронні часові домени та **окремі шкали**
+ціни й CVD; закриті дані не підмінюються попередніми.
+
+`LOADING` — очікування підписки; `AVAILABLE` — придатні дані;
+`DELAYED` — остання угода старіша за 30 с; `UNAVAILABLE` — старіша за 120 с або
+немає перевіреної семантики/джерела; `INSUFFICIENT_DATA` — неповне вікно/прогрів;
+`ERROR` — помилка транспорту/даних. Відсутність угод не означає нульову активність.
+Heartbeat не замінює час останньої угоди. За непридатного стану числа замінюються
+на «—», висновок про напрямок не формується; основний радар залишається працездатним.
+
+Існуючий `node --test` включає детерміновані CVD, transport, UI/lifecycle та regression
+fixtures без live-мережі. Нові залежності не потрібні. Production build у цьому
+статичному ES-module проєкті відсутній: окремо перевіряються синтаксис модулів,
+віддача статичних файлів і браузерний smoke test. Мережеві обмеження не дозволяють
+стверджувати, що фактичні Gate WebSocket/CORS, агресорний напрямок або live-recovery
+пройшли end-to-end перевірку.
+
 ## Дані та обмеження API
 
 Використовується офіційний [Gate API v4](https://www.gate.com/docs/developers/apiv4/en/) та чинні довідники Gate для [REST endpoints](https://github.com/gate/gateapi-python/blob/master/docs/FuturesApi.md) і [схеми `ContractStat` у Python SDK](https://github.com/gate/gateapi-python/blob/master/docs/ContractStat.md). Чинна схема документує `top_long_size` / `top_short_size` як відкритий інтерес топтрейдерів у контрактах; фактична наявність цих полів у live-відповіді не перевірена:

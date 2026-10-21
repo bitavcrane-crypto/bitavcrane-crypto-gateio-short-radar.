@@ -615,6 +615,7 @@ test("OI timeframe changes are local-only and the remove control aborts both rel
     openVisualizations: new Set(["Q_USDT"]), setOpenInterestInterval, setVisualizationInterval,
     removeVisualizationContract, removePair: function (pairs, pair) { return pairs.filter(function (value) { return value !== pair; }); },
     sortPairsBySignal: function (pairs) { return pairs; }, renderCard: function () { return ""; },
+    cvdAnalysis: { mount: function () {} },
     savePairs: function () {}, saveVisualizationSelections: function () {}, saveOpenInterestSelections: function () {},
     ensureVisualizationData: function () { assert.fail("OI timeframe change must not fetch candles"); },
     cardsNode: { querySelectorAll: function (selector) {
@@ -661,7 +662,7 @@ test("absent optional top fields are named unavailable instead of inferred from 
   assert.match(html, /TOP LONG OI · contracts/);
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /gate\/gateapi-python\/blob\/master\/docs\/ContractStat\.md/);
-  assert.doesNotMatch(readme, /github\.com\/gateio\/gateapi/);
+  assert.doesNotMatch(readme, /github\.com\/gateio\/gateapi[^/\s]*\/(?:blob|tree)\//);
   assert.match(readme, /Чинна схема документує `top_long_size` \/ `top_short_size`/);
 });
 
