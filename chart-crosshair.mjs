@@ -2,10 +2,10 @@ function finite(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-export function timestampAtPosition(times, position) {
+export function timestampAtPosition(times, position, domainTimes = times) {
   if (!Array.isArray(times) || !times.length || !finite(position)) return null;
-  const first = times[0];
-  const last = times[times.length - 1];
+  const first = domainTimes[0];
+  const last = domainTimes[domainTimes.length - 1];
   if (!finite(first) || !finite(last)) return null;
   if (times.length === 1 || first === last) return first;
   const target = first + Math.max(0, Math.min(1, position)) * (last - first);
@@ -47,11 +47,28 @@ export function valueAtPosition(value, minimum, maximum, plotTop, plotBottom) {
   return plotBottom - ((value - minimum) / (maximum - minimum)) * (plotBottom - plotTop);
 }
 
+export function valueAtClientY(clientY, bounds, viewBoxHeight, plotTop, plotBottom, minimum, maximum) {
+  if (![clientY, bounds?.top, bounds?.height, viewBoxHeight, plotTop, plotBottom, minimum, maximum]
+    .every(finite) || bounds.height <= 0 || viewBoxHeight <= 0 || plotBottom <= plotTop || maximum <= minimum) return null;
+  const viewY = (clientY - bounds.top) / bounds.height * viewBoxHeight;
+  const fraction = Math.max(0, Math.min(1, (viewY - plotTop) / (plotBottom - plotTop)));
+  return maximum - fraction * (maximum - minimum);
+}
+
 export function valuesAtTimestamp(seriesList, timestamp) {
   if (!Array.isArray(seriesList) || !finite(timestamp)) return [];
   return seriesList.map(function (series) {
     if (!series || !Array.isArray(series.times) || !Array.isArray(series.values)) return null;
-    const index = series.times.indexOf(timestamp);
+    let index = series.times.indexOf(timestamp);
+    if (index < 0 && series.asOf === true && finite(series.maxAgeSeconds) && series.maxAgeSeconds >= 0) {
+      // A historical observation is valid only at/after its own time, never from the future.
+      for (let candidate = series.times.length - 1; candidate >= 0; candidate--) {
+        if (series.times[candidate] <= timestamp) {
+          if (timestamp - series.times[candidate] <= series.maxAgeSeconds) index = candidate;
+          break;
+        }
+      }
+    }
     const value = index < 0 ? null : series.values[index];
     return finite(value) ? value : null;
   });
@@ -66,7 +83,8 @@ export function createCrosshairController(charts, onChange) {
   return {
     selectAt: function (sourceIndex, position) {
       if (!Array.isArray(charts) || !charts[sourceIndex]) return null;
-      const timestamp = timestampAtPosition(charts[sourceIndex].times, position);
+      const source = charts[sourceIndex];
+      const timestamp = timestampAtPosition(source.cursorTimes || source.times, position, source.times);
       if (timestamp === null) return null;
       if (typeof onChange === "function") {
         onChange(timestamp, charts.map(function (chart) {

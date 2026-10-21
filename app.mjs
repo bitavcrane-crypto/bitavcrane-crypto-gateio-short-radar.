@@ -1,5 +1,5 @@
 import { addPair, buildMarketData, normalizeCandles, rankPumpCandidates, removePair, sortPairsBySignal, transitionSignal, validatePairList } from "./core.mjs";
-import { fetchCandles, fetchContracts, fetchContractStats, fetchFundingHistory, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
+import { fetchCandles, fetchContracts, fetchContractStats, fetchFundingHistory, fetchUsdcUsdtRate, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker } from "./gate-api.mjs";
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
@@ -7,7 +7,11 @@ import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createVisibleWallTracker } from "./wall-monitor.mjs";
 import { summarizeShort, rankShortCandidates, formatLevelPrice, readableTechnicalText, chartWindow, contextSeries } from "./radar-presentation.mjs";
-import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition } from "./chart-crosshair.mjs";
+import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition, valueAtClientY } from "./chart-crosshair.mjs";
+import { axisTicks, timeAxisTicks, formatChartValue, chartReadout, layoutAxisLabels, normalizeChartLayers, oiChangeRows } from "./chart-tools.mjs";
+import { WHALE_COHORT } from "./hyperliquid-cohort.mjs";
+import { createHyperliquidClient, hyperliquidCoin, freshWhaleSnapshot, normalizeWhaleHistory,
+  recordWhaleHistory, whaleHistorySeries, WHALE_HISTORY_KEY } from "./hyperliquid.mjs";
 import {
   getOpenInterestInterval, getVisualizationInterval, normalizeOpenInterestSelections,
   normalizeVisualizationSelections, removeVisualizationContract, setOpenInterestInterval,
@@ -25,6 +29,7 @@ const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
 const OPEN_INTEREST_STATE_KEY = "gate-short-radar-oi-visualization-state";
 const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const EVENTS_KEY = "gate-short-radar-signal-events-v1";
+const CHART_LAYERS_KEY = "gate-short-radar-chart-layers-v1";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
 };
@@ -38,6 +43,12 @@ const eventList = document.getElementById("event-list");
 const pairInput = document.getElementById("pair-input");
 let confirmationSettings = loadConfirmationSettings();
 let visualizationSettings = loadVisualizationSettings();
+let chartLayers = loadChartLayers();
+let openLayerMenus = new Set();
+let whaleHistory = loadWhaleHistory();
+let whaleState = { status: "idle", snapshot: null, fx: null, error: null };
+let whaleRequest = null;
+const whaleClient = createHyperliquidClient();
 let contracts = [];
 let manualPairs = loadPairs();
 let automaticPairs = [];
@@ -58,6 +69,7 @@ let visualizationRequests = {};
 let statsRequests = {};
 let pairVersions = {};
 let visualizationCrosshairTimes = {};
+let chartResizeObservers = [];
 let minimumRiskReward = loadMinimumRiskReward();
 let busy = false;
 let lastSuccessfulUpdate = null;
@@ -102,6 +114,95 @@ function loadVisualizationSettings() {
   } catch (error) {
     return normalizeVisualizationSettings(DEFAULT_VISUALIZATION_SETTINGS);
   }
+}
+
+function loadChartLayers() {
+  try { return normalizeChartLayers(JSON.parse(localStorage.getItem(CHART_LAYERS_KEY) || "null")); }
+  catch { return normalizeChartLayers(null); }
+}
+
+function applyChartLayers(value) {
+  chartLayers = normalizeChartLayers(value);
+  try { localStorage.setItem(CHART_LAYERS_KEY, JSON.stringify(chartLayers)); }
+  catch {
+    noticeNode.hidden = false;
+    noticeNode.textContent = "Вибір індикаторів діє зараз, але не зберігся на цьому пристрої.";
+  }
+  if (!chartLayers.funding) {
+    Object.values(fundingRequests).forEach(controller => controller.abort());
+  } else openVisualizations.forEach(pair => ensureFundingHistory(pair));
+  ensureWhaleContext();
+  render();
+}
+
+function loadWhaleHistory() {
+  try { return normalizeWhaleHistory(JSON.parse(localStorage.getItem(WHALE_HISTORY_KEY) || "null"), Date.now() / 1000); }
+  catch { return normalizeWhaleHistory(null, Date.now() / 1000); }
+}
+
+function whalePairs() {
+  return chartLayers.whales ? [...openVisualizations].filter(pair =>
+    pairs.includes(pair) && openTokens.has(pair) && hyperliquidCoin(pair)) : [];
+}
+
+function cancelUnusedWhaleRequest() {
+  if (!whalePairs().length && whaleRequest) {
+    whaleRequest.controller.abort();
+    whaleRequest = null;
+    whaleState.status = whaleState.snapshot ? "ok" : "idle";
+  }
+}
+
+async function ensureWhaleContext() {
+  const active = whalePairs();
+  if (!active.length) { cancelUnusedWhaleRequest(); return; }
+  if (whaleRequest) return;
+  if (whaleState.status === "error" && Date.now() - whaleState.attemptedAt < POLL_MS) return;
+  if (freshWhaleSnapshot(whaleState.snapshot, Date.now()) && whaleState.status === "ok" &&
+      Date.now() - whaleState.fx?.fetchedAt <= 120000 &&
+      Date.now() - whaleState.snapshot.observedAt < POLL_MS) {
+    rememberWhaleSnapshot(whaleState.snapshot, whaleState.fx);
+    return;
+  }
+  const request = { controller: new AbortController() };
+  whaleRequest = request;
+  whaleState = { ...whaleState, status: "loading", attemptedAt: Date.now(), error: null };
+  try {
+    // Start together, settle together; no dangling rejected FX promise if the cohort fails.
+    const result = await Promise.allSettled([
+      whaleClient.snapshot({ signal: request.controller.signal }),
+      fetchUsdcUsdtRate(request.controller.signal)
+    ]);
+    if (whaleRequest !== request || request.controller.signal.aborted) return;
+    const failed = result.find(item => item.status === "rejected");
+    if (failed) throw failed.reason;
+    const snapshot = result[0].value;
+    const fx = result[1].value;
+    if (!freshWhaleSnapshot(snapshot, Date.now()) || !Number.isFinite(fx?.rate) || fx.rate <= 0 ||
+        !Number.isFinite(fx.fetchedAt) || Date.now() - fx.fetchedAt > 120000 || fx.fetchedAt > Date.now() + 30000 ||
+        snapshot.time < (whaleState.snapshot?.time || 0)) {
+      throw new Error("Знімки Hyperliquid або курс USDC/USDT застаріли.");
+    }
+    whaleState = { status: "ok", snapshot, fx, error: null };
+    rememberWhaleSnapshot(snapshot, fx);
+  } catch (error) {
+    if (whaleRequest === request && !request.controller.signal.aborted) {
+      whaleState = { ...whaleState, status: "error", error: error.message || "Hyperliquid недоступний." };
+    }
+  } finally {
+    if (whaleRequest === request) { whaleRequest = null; render(); }
+  }
+}
+
+function rememberWhaleSnapshot(snapshot, fx) {
+  const active = whalePairs().map(hyperliquidCoin).filter(coin => snapshot.activeCoins.includes(coin)).slice(-12);
+  if (active.every(coin => whaleHistory.coins[coin]?.at(-1)?.time === snapshot.time)) return;
+  whaleHistory = recordWhaleHistory(whaleHistory, snapshot, active, fx);
+  try {
+    localStorage.setItem(WHALE_HISTORY_KEY, JSON.stringify(whaleHistory));
+    delete whaleState.historyError;
+  }
+  catch { whaleState.historyError = "Історію не вдалося зберегти на цьому пристрої; поточні дані доступні."; }
 }
 
 function loadVisualizationSelections() {
@@ -388,26 +489,120 @@ function currentTickerPrice(model) {
     ticker.last : null;
 }
 
+function renderChartLayerMenu(pair) {
+  const choices = [
+    ["ema", "EMA на ціні · Gate"], ["obv", "OBV · не CVD"], ["volume", "Обсяг · Gate"],
+    ["oi", "Відкритий інтерес · Gate"], ["oiChange", "Зміна OI · фактична різниця 5m"],
+    ["funding", "Funding · фактичні ставки Gate"], ["topOi", "LONG / SHORT OI топтрейдерів · у деталях"],
+    ["whales", "Середні входи великих позицій · Hyperliquid"]
+  ];
+  return '<details class="chart-layer-menu" data-layer-menu="' + escapeHtml(pair) + '"' +
+    (openLayerMenus.has(pair) ? " open" : "") + '><summary>Індикатори · ' +
+    choices.filter(item => chartLayers[item[0]]).length + '</summary><div class="chart-layer-options">' +
+    '<p>Ціна / свічки — завжди. Ці перемикачі змінюють лише графіки, не правила SHORT.</p>' +
+    choices.map(function ([key, label]) {
+      return '<label><input type="checkbox" data-chart-layer="' + key + '" data-layer-pair="' +
+        escapeHtml(pair) + '"' + (chartLayers[key] ? " checked" : "") + '><span>' + label + "</span></label>";
+    }).join("") +
+    '<label>Лінії Hyperliquid <select data-whale-mode="' + escapeHtml(pair) + '">' +
+    '<option value="levels"' + (chartLayers.whaleMode === "levels" ? " selected" : "") + '>Поточні рівні</option>' +
+    '<option value="history"' + (chartLayers.whaleMode === "history" ? " selected" : "") + '>Історія знімків цього пристрою</option></select></label>' +
+    '<button type="button" class="subtle-button" data-chart-cvd="' + escapeHtml(pair) + '">CVD Binance · окреме джерело</button>' +
+    '<details class="unavailable-indicators"><summary>Що зі скриншота поки недоступне</summary>' +
+    ["Реальні входи / виходи та дії китів", "Команда токена / smart money", "Кити проти всього ринку",
+      "Net Longs / Net Shorts за потоком угод", "Історія лістингів", "Карта майбутніх ліквідацій"].map(label =>
+      '<label><input type="checkbox" disabled><span>' + label + "</span></label>").join("") +
+    '<p>Для цих функцій немає підтвердженого повного джерела в поточному віджеті. ' +
+    'Зміна розміру позиції між двома знімками не доводить, які саме угоди відбулися між ними. ' +
+    'Агрегати Gate не підміняють індивідуальні позиції.</p></details></div></details>';
+}
+
+function renderWhaleLayer(pair, chartTimes, historical) {
+  const empty = { domainTimes: chartTimes, references: [], series: [], note: "" };
+  if (!chartLayers.whales) return empty;
+  const coin = hyperliquidCoin(pair);
+  if (!coin) return { ...empty, note: '<p class="whale-context unavailable"><strong>Hyperliquid: немає перевіреного зіставлення цієї пари.</strong> Лінії не вигадуються й не замінюються показниками Gate.</p>' };
+  const snapshot = whaleState.snapshot;
+  const active = !snapshot || snapshot.activeCoins.includes(coin);
+  const fx = whaleState.fx;
+  const fresh = active && whaleState.status !== "error" && freshWhaleSnapshot(snapshot, Date.now()) &&
+    Number.isFinite(fx?.rate) && fx.rate > 0 && Number.isFinite(fx.fetchedAt) && Date.now() - fx.fetchedAt <= 120000;
+  const view = fresh ? snapshot.coins[coin] : null;
+  const rows = whaleHistory.coins[coin] || [];
+  let domainTimes = chartTimes;
+  if (chartLayers.whaleMode === "history" && !historical && rows.length &&
+      rows.at(-1).time > chartTimes.at(-1) && rows.at(-1).time <= Date.now() / 1000) {
+    domainTimes = chartTimes.concat(rows.at(-1).time);
+  }
+  const definitions = [
+    ["long", "HL LONG", "#71A5D2"], ["short", "HL SHORT", "#F59A98"]
+  ];
+  const references = chartLayers.whaleMode === "levels" && fresh && !historical ?
+    definitions.filter(([side]) => Number.isFinite(view?.[side].entry)).map(([side, label, color]) => ({
+      label: label + " · зараз", value: view[side].entry * fx.rate, color, side,
+      time: snapshot.time, count: view[side].count
+    })) : [];
+  const series = chartLayers.whaleMode === "history" ? definitions.map(([side, label, color]) => ({
+    ...whaleHistorySeries(whaleHistory, coin, side, domainTimes), color,
+    label: label + " · знімки, екв. USDT", digits: 8, dash: true, step: true,
+    asOf: true, maxAgeSeconds: 180
+  })) : [];
+  const stateText = !active ? "Активний контракт не підтверджено в основному переліку Hyperliquid." :
+    whaleState.status === "loading" ? "Оновлюємо відкриті позиції вибірки…" :
+    whaleState.status === "error" ? "Нові лінії приховано: " + whaleState.error :
+    !fresh ? "Немає свіжого повного знімка або курсу USDC/USDT. Поточні лінії приховано." :
+    !view ? "У перевіреній вибірці немає позицій цього токена розміром від 1 млн USDC." :
+    definitions.map(([side, label]) => label + ": " + (view[side].entry === null ? "немає у вибірці" :
+      formatChartValue(view[side].entry, true) + " USDC · " + view[side].count + " поз.")).join(" · ");
+  const modeNote = chartLayers.whaleMode === "levels" ?
+    (historical ? "Поточні рівні приховано під час перегляду минулого." :
+      "Пунктир — поточні середні входи, НЕ історія та НЕ час відкриття угод.") :
+    "Криві — лише фактично зібрані знімки на цьому пристрої, не відновлена історія угод. Пропуски не заповнюються.";
+  return { domainTimes, references, series,
+    note: '<section class="whale-context' + (!fresh ? " unavailable" : "") + '"><strong>Hyperliquid · окремий контекст, не Gate.io</strong>' +
+    '<p class="whale-legend"><span class="whale-long">Синій пунктир — LONG</span><span class="whale-short">Червоний — SHORT</span></p>' +
+    '<p>' + escapeHtml(stateText) + '</p><p><strong>' + modeNote + "</strong></p>" +
+    (snapshot ? '<p>Останній повний знімок: ' + escapeHtml(formatCrosshairTime(snapshot.time)) +
+      ' · перевірено ' + snapshot.checked + " адрес.</p>" : "") +
+    (fresh ? '<p>На графіку — еквівалент USDT за курсом USDC/USDT ' + formatChartValue(fx.rate, true) +
+      " (Gate spot bid/ask midpoint).</p>" : "") +
+    (whaleState.historyError ? "<p>" + escapeHtml(whaleState.historyError) + "</p>" : "") +
+    '<details><summary>Джерело та межі достовірності</summary><p>Публічний Hyperliquid clearinghouseState, ' +
+    WHALE_COHORT.addresses.length + ' фіксованих адрес, відібраних ' + WHALE_COHORT.selectedOn +
+    ". Кожна включена позиція має поточний номінал ≥1 млн USDC. Середня = сума entryPx × |розмір| / сума |розмірів|, окремо для LONG і SHORT. " +
+    "Це вибірка, не всі кити. Адреси можуть бути пулами, субакаунтами або належати одному власнику; команда токена і smart money не ідентифікуються. " +
+    "Зміна середнього може означати зміну складу вибірки позицій, а не нове відкриття. Список адрес фіксований, не поточний рейтинг. " +
+    "За помилки хоча б однієї адреси нове середнє не публікується. Вік знімка/курсу понад 120 секунд приховує поточні лінії. " +
+    'Історія зберігається локально до 24 годин; закритий віджет не збирає нові знімки. Цей шар не змінює SHORTscore, Entry, Stop або TP.</p>' +
+    '<a href="https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals" target="_blank" rel="noopener noreferrer">Документація Hyperliquid</a></details></section>' };
+}
+
 function chartSvg(seriesList, options) {
   const currentPrice = options.priceChart && typeof options.currentPrice === "number" &&
     Number.isFinite(options.currentPrice) && options.currentPrice > 0 ? options.currentPrice : null;
   const allValues = seriesList.reduce(function (values, series) {
     return values.concat(series.values.filter(function (value) { return typeof value === "number" && Number.isFinite(value); }));
   }, currentPrice === null ? [] : [currentPrice]);
-  (options.candles || []).forEach(function (candle) { allValues.push(candle.high, candle.low); });
+  (options.candles || []).forEach(function (candle) {
+    for (const value of [candle.high, candle.low]) if (Number.isFinite(value)) allValues.push(value);
+  });
+  const references = options.priceChart ? (options.references || []).filter(item =>
+    Number.isFinite(item.value) && item.value > 0) : [];
+  references.forEach(item => allValues.push(item.value));
+  if (options.bars) allValues.push(0);
   if (!allValues.length) return '<p class="chart-empty">Немає даних для графіка</p>';
   if (allValues.length < 2) return '<p class="chart-empty">Недостатньо даних для графіка</p>';
   const min = options.min === undefined ? Math.min.apply(null, allValues) : options.min;
   const max = options.max === undefined ? Math.max.apply(null, allValues) : options.max;
   const range = max === min ? Math.abs(max) * 0.1 || 1 : max - min;
-  const low = options.min === undefined ? min - range * 0.08 : min;
+  const low = options.min === undefined ? (options.bars && min === 0 ? 0 : min - range * 0.08) : min;
   const high = options.max === undefined ? max + range * 0.08 : max;
   const width = 440;
-  const height = 160;
+  const height = 200;
   const pad = 5;
   const plotEnd = 330;
   const plotTop = pad;
-  const plotBottom = height - pad;
+  const plotBottom = 155;
   const x = function (time, times) {
     const first = options.domainTimes[0];
     const last = options.domainTimes[options.domainTimes.length - 1];
@@ -429,24 +624,53 @@ function chartSvg(seriesList, options) {
     return '<line x1="' + position + '" y1="0" x2="' + position + '" y2="' + height +
       '" stroke="#ff958c" stroke-dasharray="3 3"/>';
   }).join("");
-  const paths = seriesList.map(function (series) {
+  const axes = axisTicks(low, high).map(function (value) {
+    return '<line x1="' + pad + '" x2="' + (plotEnd - pad) + '" y1="' + y(value) + '" y2="' +
+      y(value) + '" stroke="#29384a" stroke-width="0.6"/><text class="chart-axis-value" x="435" y="' +
+      (y(value) + 3) + '" text-anchor="end" fill="#a9bad0" font-size="10">' +
+      escapeHtml(formatChartValue(value, options.priceChart, !options.priceChart)) + "</text>";
+  }).join("") + '<line x1="' + plotEnd + '" x2="' + plotEnd + '" y1="' + plotTop + '" y2="' +
+    plotBottom + '" stroke="#536276"/>' + timeAxisTicks(options.domainTimes).map(function (tick, index, ticks) {
+      const anchor = index === 0 ? "start" : index === ticks.length - 1 ? "end" : "middle";
+      return '<text class="chart-axis-date" x="' + x(tick.time) + '" y="174" text-anchor="' + anchor +
+        '" fill="#b7c4d5" font-size="11">' + tick.day + '</text><text class="chart-axis-time" x="' +
+        x(tick.time) + '" y="190" text-anchor="' + anchor + '" fill="#b7c4d5" font-size="11">' + tick.clock + "</text>";
+    }).join("") + '<text x="435" y="190" text-anchor="end" fill="#a9bad0" font-size="10">UTC</text>';
+  const paths = seriesList.map(function (series, seriesIndex) {
     const times = series.times || options.times;
+    if (options.candles?.length && seriesIndex === 0 && series.label === "Close") return "";
+    if (options.bars) {
+      const spacing = times.length > 1 ? Math.abs(x(times[1]) - x(times[0])) : 4;
+      const barWidth = Math.max(0.6, Math.min(8, spacing * 0.7 / seriesList.length));
+      return series.values.map(function (value, index) {
+        if (!Number.isFinite(value)) return "";
+        const center = x(times[index]) + (seriesIndex - (seriesList.length - 1) / 2) * barWidth;
+        return '<rect x="' + (center - barWidth / 2) + '" y="' + Math.min(y(0), y(value)) + '" width="' +
+          barWidth + '" height="' + Math.max(0.4, Math.abs(y(value) - y(0))) + '" fill="' + series.color + '"/>';
+      }).join("");
+    }
     const pathsForSeries = [];
     let points = [];
     series.values.forEach(function (value, index) {
       const position = times && times[index] !== undefined ? x(times[index], options.domainTimes) : null;
       if (typeof value === "number" && Number.isFinite(value) && position !== null &&
           position >= pad && position <= plotEnd - pad) {
+        if (series.step && points.length) points.push(position + "," + points.at(-1).split(",")[1]);
         points.push(position + "," + y(value));
       } else if (points.length) {
-        if (points.length > 1) pathsForSeries.push(points.join(" "));
+        pathsForSeries.push(points);
         points = [];
       }
     });
-    if (points.length > 1) pathsForSeries.push(points.join(" "));
+    if (points.length) pathsForSeries.push(points);
     return pathsForSeries.map(function (line) {
-      return '<polyline fill="none" stroke="' + series.color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="' +
-        line + '"/>';
+      if (line.length === 1) {
+        const [cx, cy] = line[0].split(",");
+        return '<circle cx="' + cx + '" cy="' + cy + '" r="2.5" fill="' + series.color + '"/>';
+      }
+      return '<polyline fill="none" stroke="' + series.color + '" stroke-width="2"' +
+        (series.dash ? ' stroke-dasharray="5 4" data-whale-history-line' : "") +
+        ' stroke-linecap="round" stroke-linejoin="round" points="' + line.join(" ") + '"/>';
     }).join("");
   }).join("");
   const candlePaths = (options.candles || []).map(function (candle) {
@@ -467,17 +691,33 @@ function chartSvg(seriesList, options) {
       '" text-anchor="end" fill="#8cecff" font-size="10" font-weight="700">LIVE ' +
       escapeHtml(formatNumber(currentPrice, 8)) + "</text>";
   })();
+  const referenceOverlays = references.map(function (item) {
+    return '<line data-whale-entry-line="' + item.side + '" x1="' + pad + '" x2="' +
+      (plotEnd - pad) + '" y1="' + y(item.value) + '" y2="' + y(item.value) + '" stroke="' +
+      item.color + '" stroke-width="2" stroke-dasharray="6 4"/>';
+  }).join("") + layoutAxisLabels(references.map(item => ({ ...item, y: y(item.value) })),
+    plotTop + 8, plotBottom - 7).map(function (item) {
+      return '<path d="M ' + (plotEnd - pad) + " " + item.y + " L " + (plotEnd + 4) + " " +
+        item.labelY + '" stroke="' + item.color + '" fill="none"/><g data-whale-entry-label="' +
+        item.side + '" transform="translate(0 ' + (item.labelY - 7) + ')"><rect x="332" y="0" width="106" height="14" rx="2" fill="#10212c" stroke="' +
+        item.color + '"/><text x="435" y="11" text-anchor="end" fill="' + item.color +
+        '" font-size="10" font-weight="700">' + (item.side === "long" ? "L " : "S ") +
+        escapeHtml(formatChartValue(item.value, true)) + "</text></g>";
+    }).join("");
   const seriesData = seriesList.map(function (series) {
-    return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits };
-  });
-  return '<svg class="indicator-chart-svg" viewBox="0 0 440 160" role="img" aria-label="' +
+    return { label: series.label, times: series.times || options.times, values: series.values, digits: series.digits,
+      asOf: series.asOf, maxAgeSeconds: series.maxAgeSeconds };
+  }).concat(options.tooltipSeries || []);
+  return '<svg class="indicator-chart-svg" viewBox="0 0 440 200" role="img" aria-label="' +
     escapeHtml(options.label) + '" preserveAspectRatio="none" tabindex="0" data-chart-viewbox-width="' + width +
+    '" data-chart-viewbox-height="' + height +
     '" data-chart-plot-start="' + pad + '" data-chart-plot-end="' + (plotEnd - pad) +
     '" data-chart-plot-top="' + plotTop + '" data-chart-plot-bottom="' + plotBottom +
     '" data-chart-min="' + low + '" data-chart-max="' + high + '" data-chart-role="' +
     (options.priceChart ? "price" : "indicator") + '" data-chart-times=\'' +
-    JSON.stringify(options.domainTimes) + '\' data-chart-series=\'' + JSON.stringify(seriesData) + '\'>' +
-    backgrounds + guides + markers + paths + candlePaths + currentPriceOverlay +
+    escapeHtml(JSON.stringify(options.domainTimes)) + '\' data-chart-series=\'' +
+    escapeHtml(JSON.stringify(seriesData)) + '\' data-chart-references=\'' + escapeHtml(JSON.stringify(references)) + '\'>' +
+    backgrounds + axes + guides + markers + paths + candlePaths + currentPriceOverlay + referenceOverlays +
     '<line data-crosshair-horizontal x1="' + pad + '" y1="' + plotTop + '" x2="' + (plotEnd - pad) +
     '" y2="' + plotTop + '" stroke="#56d9f5" stroke-width="1.5" stroke-dasharray="3 2" visibility="hidden" pointer-events="none"/>' +
     '<line data-crosshair-line x1="' + pad + '" y1="' + plotTop + '" x2="' + pad + '" y2="' + plotBottom +
@@ -485,7 +725,12 @@ function chartSvg(seriesList, options) {
     (options.priceChart ?
       '<g data-crosshair-price-label visibility="hidden" pointer-events="none"><rect x="330" y="2" width="108" height="14" rx="3" fill="#123344" stroke="#56d9f5"/>' +
       '<text data-crosshair-price x="435" y="12" text-anchor="end" fill="#8cecff" font-size="10" font-weight="700">Немає даних</text></g>' : "") +
-    "</svg>";
+    '<g data-crosshair-time-label visibility="hidden" pointer-events="none"><rect x="0" y="159" width="110" height="36" rx="3" fill="#123344" stroke="#56d9f5"/>' +
+    '<text data-crosshair-axis-date x="55" y="173" text-anchor="middle" fill="#8cecff" font-size="11"></text>' +
+    '<text data-crosshair-axis-time x="55" y="189" text-anchor="middle" fill="#8cecff" font-size="11"></text></g>' +
+    '</svg><p class="chart-readout" data-chart-readout>Торкніться графіка або наведіть курсор, щоб побачити значення.</p>' +
+    '<div class="chart-series-legend">' + seriesList.map(series => '<span style="color:' + series.color + '">' +
+      escapeHtml(series.label) + '</span>').join("") + "</div>";
 }
 
 function directionLabel(value) {
@@ -512,7 +757,7 @@ function hasBullishFourHourTrend(pair, interval) {
 
 function renderIndicatorVisualization(pair) {
   const interval = selectedVisualizationInterval(pair);
-  const oiPanel = renderOpenInterestVisualization(pair);
+  const oiPanel = chartLayers.topOi ? renderOpenInterestVisualization(pair) : "";
   const data = visualizationData[pair] && visualizationData[pair][interval];
   const cacheTime = data && data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString("uk-UA") : "немає";
   const lastCandle = data && data.candles && data.candles.length ?
@@ -522,7 +767,7 @@ function renderIndicatorVisualization(pair) {
     escapeHtml(pair) + '" aria-label="Таймфрейм графіків ' + escapeHtml(pair) + '">' +
     Object.keys(VISUALIZATION_INTERVALS).map(function (item) {
       return '<option value="' + item + '"' + (item === interval ? " selected" : "") + ">" + item + "</option>";
-    }).join("") + '</select></label></div>';
+    }).join("") + '</select></label></div>' + renderChartLayerMenu(pair);
   if (!data || data.loading || (!data.candles && !data.error)) {
     return header + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>" + oiPanel;
   }
@@ -550,6 +795,8 @@ function renderIndicatorVisualization(pair) {
   const chartCandles = view.candles.slice(viewport.start, viewport.end);
   const visibleValues = function (values) { return values.slice(viewport.start, viewport.end); };
   const chartTimes = chartCandles.map(function (candle) { return candle.time; });
+  const whaleLayer = renderWhaleLayer(pair, chartTimes, viewport.offset > 0);
+  const chartDomainTimes = whaleLayer.domainTimes;
   const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
   const obv = indicators.obv;
@@ -560,26 +807,30 @@ function renderIndicatorVisualization(pair) {
       chartSvg([
         { values: visibleValues(obv.values), color: "#e8b86d", label: "OBV", digits: 2, times: chartTimes },
         { values: visibleValues(obv.averageValues), color: "#77c8ff", label: "SMA " + obv.lookback, digits: 2, times: chartTimes }
-      ], { label: "OBV та SMA " + obv.lookback, times: chartTimes, domainTimes: chartTimes }) +
+      ], { label: "OBV та SMA " + obv.lookback, times: chartTimes, domainTimes: chartDomainTimes }) +
       '<p class="chart-footnote">OBV розраховано за напрямком close; лінія згладжування — SMA(' +
       obv.lookback + "). Абсолютний OBV не є самостійним SHORT-сигналом.</p>";
   const ema = indicators.ema;
   const emaColors = ["#49d4a5", "#f18c8c", "#c59bff"];
   const emaContent = '<p class="chart-summary">Close ' + formatLevelPrice(ema.close) + " · " +
-    ema.lines.map(function (line) {
+    (chartLayers.ema ? ema.lines.map(function (line) {
       return "EMA(" + line.period + ") " + formatLevelPrice(line.value) + " " + directionLabel(line.direction);
     }).join(" · ") + " · " + ema.position + " · перетин на останній свічці: " +
     (ema.crosses.length ? ema.crosses.map(function (cross) {
       return cross.periods.join("/") + " " + cross.direction;
-    }).join(", ") : "немає") + "</p>" +
+    }).join(", ") : "немає") : "EMA приховано") + "</p>" +
     chartSvg([{
       values: visibleValues(ema.closeValues), color: "#f3f5f7", label: "Close", digits: 8, times: chartTimes
-    }].concat(ema.lines.map(function (line, index) {
+    }].concat((chartLayers.ema ? ema.lines : []).map(function (line, index) {
       return {
         values: visibleValues(line.values), color: emaColors[index % emaColors.length],
         label: "EMA " + line.period, digits: 8, times: chartTimes
       };
-    })), { label: "Ціна та EMA " + ema.periods.join(", "), times: chartTimes, domainTimes: chartTimes,
+    })).concat(whaleLayer.series), { label: "Ціна Gate · USDT, EMA та окремий контекст Hyperliquid",
+      times: chartTimes, domainTimes: chartDomainTimes, references: whaleLayer.references,
+      tooltipSeries: [["open", "Відкриття"], ["high", "Максимум"], ["low", "Мінімум"]].map(([key, label]) => ({
+        label, times: chartTimes, values: chartCandles.map(candle => candle[key]), digits: 8
+      })),
       candles: chartCandles, priceChart: true, currentPrice: viewport.offset === 0 ? currentPrice : null }) +
     (ema.lines.some(function (line) { return !Number.isFinite(line.value); }) ?
       '<p class="chart-footnote">Недостатньо історії для EMA ' + ema.lines.filter(function (line) {
@@ -614,10 +865,11 @@ function renderIndicatorVisualization(pair) {
     '<span>' + escapeHtml(formatCrosshairTime(chartTimes[0])) + " → " +
       escapeHtml(formatCrosshairTime(chartEndTime)) + " · видно " + chartCandles.length + "</span></div>" +
     (viewport.offset > 0 ? '<p class="visualization-message"><strong>Перегляд історії.</strong> Текстові висновки індикаторів і радара стосуються останніх даних, а не минулого вікна. Це не відтворення сигналів і не backtest.</p>' : "") +
+    whaleLayer.note + '<p class="chart-footnote">Шкали часу — UTC. Праворуч — ціна або одиниці відповідного індикатора. Торкніться графіка для точних значень.</p>' +
     '<div class="indicator-chart-grid">' +
-    '<section class="indicator-chart-card"><h4>Ціна / EMA · ' + ema.periods.join(" / ") + "</h4>" + emaContent + "</section>" +
-    '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section></div>" +
-    (model && model.data ? (function () {
+    '<section class="indicator-chart-card"><h4>Ціна · USDT' + (chartLayers.ema ? " / EMA · " + ema.periods.join(" / ") : "") + "</h4>" + emaContent + "</section>" +
+    (chartLayers.obv ? '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section>" : "") + "</div>" +
+    (chartLayers.volume && model && model.data ? (function () {
       const recent = chartCandles;
       const recentTimes = recent.map(function (candle) { return candle.time; });
       return '<div class="indicator-chart-grid market-chart-grid">' +
@@ -625,9 +877,9 @@ function renderIndicatorVisualization(pair) {
         chartSvg([{
           values: recent.map(function (candle) { return candle.volume; }),
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
-        }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartTimes }) + "</section></div>";
-    })() : "") + renderMarketContext(pair, chartTimes) +
-    '<details class="technical-details"><summary>Додатково: позиції топтрейдерів (лише за наявності даних)</summary>' + oiPanel + "</details>" +
+        }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartDomainTimes, bars: true }) + "</section></div>";
+    })() : "") + renderMarketContext(pair, chartDomainTimes) +
+    (chartLayers.topOi ? '<details class="technical-details"><summary>Додатково: позиції топтрейдерів (лише за наявності даних)</summary>' + oiPanel + "</details>" : "") +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
     escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
@@ -689,25 +941,30 @@ function renderMarketContext(pair, domainTimes) {
   const data = models[pair]?.data;
   const oi = contextSeries(data?.oiVisualizationHistory || [], "openInterest", domainTimes, 600);
   const funding = contextSeries(fundingHistory[pair]?.rows || [], "ratePercent", domainTimes, 86400);
-  const draw = function (series, label, color, digits) {
+  const draw = function (series, label, color, digits, bars = false, step = false) {
     return series.values.filter(Number.isFinite).length >= 2 ?
-      chartSvg([{ values: series.values, times: series.times, label, color, digits }],
-        { times: series.times, domainTimes, label }) :
+      chartSvg([{ values: series.values, times: series.times, label, color, digits, step }],
+        { times: series.times, domainTimes, label, bars }) :
       '<p class="chart-empty">Недостатньо фактичних точок у вибраному діапазоні. Пропуски не заповнюються.</p>';
   };
   const oiState = data?.stats?.quality || "NO DATA";
   const fundingState = fundingHistory[pair]?.error ? " · оновлення недоступне, показано останню історію" :
     fundingHistory[pair]?.rows ? "" : " · очікування завантаження";
+  const delta = contextSeries(oiChangeRows(data?.oiVisualizationHistory || []), "change", domainTimes, 600);
   return '<div class="indicator-chart-grid market-context-charts">' +
-    '<section class="indicator-chart-card"><h4>Загальний OI · контракти</h4>' +
+    (chartLayers.oi ? '<section class="indicator-chart-card"><h4>Загальний OI · контракти</h4>' +
     '<p class="chart-footnote">Gate.io · реальні 5m знімки · останні до 100 точок (приблизно 8 год) · стан ' +
-      escapeHtml(oiState) + ' · не net longs/shorts.</p>' + draw(oi, "OI · контракти", "#c59bff", 2) + "</section>" +
-    '<section class="indicator-chart-card"><h4>Funding · фактичні розрахунки, %</h4>' +
+      escapeHtml(oiState) + ' · не net longs/shorts.</p>' + draw(oi, "OI · контракти", "#c59bff", 2) + "</section>" : "") +
+    (chartLayers.oiChange ? '<section class="indicator-chart-card"><h4>Зміна OI · контракти / 5m</h4>' +
+      '<p class="chart-footnote">Різниця двох послідовних 5m знімків Gate. Не розподіл на відкриті LONG / SHORT і не входи китів.</p>' +
+      draw(delta, "Δ OI · контракти / 5m", "#61A9BD", 2, true) + "</section>" : "") +
+    (chartLayers.funding ? '<section class="indicator-chart-card"><h4>Funding · фактичні розрахунки, %</h4>' +
     '<p class="chart-footnote">Gate.io · ставки за фактичний період, не нормалізація до 8h і не прогноз' +
-      escapeHtml(fundingState) + ".</p>" + draw(funding, "Funding · % за період", "#e8b86d", 5) + "</section></div>";
+      escapeHtml(fundingState) + ".</p>" + draw(funding, "Funding · % за період", "#e8b86d", 5, false, true) + "</section>" : "") + "</div>";
 }
 
 async function ensureFundingHistory(pair) {
+  if (!chartLayers.funding) return;
   if (fundingRequests[pair] || (fundingHistory[pair]?.updatedAt &&
       Date.now() - fundingHistory[pair].updatedAt < 60000)) return;
   const controller = new AbortController();
@@ -742,6 +999,12 @@ function renderVisualizationControl(pair) {
 function bindSynchronizedCrosshair(panel, pair) {
   const chartElements = Array.from(panel.querySelectorAll(".indicator-chart-svg"));
   if (!chartElements.length) return;
+  fitChartText(panel);
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(function () { fitChartText(panel); });
+    chartElements.forEach(svg => observer.observe(svg));
+    chartResizeObservers.push(observer);
+  }
   const charts = chartElements.map(function (svg) {
     return {
       times: JSON.parse(svg.getAttribute("data-chart-times") || "[]"),
@@ -750,6 +1013,7 @@ function bindSynchronizedCrosshair(panel, pair) {
   });
   const timeLabels = Array.from(panel.querySelectorAll("[data-chart-time]"));
   let activePointer = null;
+  let activePriceCursor = null;
   const controller = createCrosshairController(charts, function (timestamp, updates) {
     visualizationCrosshairTimes[pair] = timestamp;
     updates.forEach(function (update, chartIndex) {
@@ -757,9 +1021,18 @@ function bindSynchronizedCrosshair(panel, pair) {
       const line = svg.querySelector("[data-crosshair-line]");
       const horizontal = svg.querySelector("[data-crosshair-horizontal]");
       const priceLabel = svg.querySelector("[data-crosshair-price-label]");
+      const axisTimeLabel = svg.querySelector("[data-crosshair-time-label]");
+      const readout = svg.nextElementSibling;
+      if (readout?.hasAttribute("data-chart-readout")) {
+        const references = JSON.parse(svg.getAttribute("data-chart-references") || "[]");
+        readout.textContent = formatCrosshairTime(timestamp) + " · " + chartReadout(charts[chartIndex].series, update.values) +
+          (references.length ? " · Поточні орієнтири HL (НЕ за часом курсора): " +
+            references.map(item => item.label + " " + formatChartValue(item.value, true) + " USDT").join(" · ") : "");
+      }
       if (update.position === null) {
         line.setAttribute("visibility", "hidden");
         horizontal.setAttribute("visibility", "hidden");
+        if (axisTimeLabel) axisTimeLabel.setAttribute("visibility", "hidden");
         if (priceLabel) {
           priceLabel.querySelector("[data-crosshair-price]").textContent = "Немає даних";
           priceLabel.setAttribute("visibility", "visible");
@@ -773,8 +1046,15 @@ function bindSynchronizedCrosshair(panel, pair) {
         line.setAttribute("x1", String(x));
         line.setAttribute("x2", String(x));
         line.setAttribute("visibility", "visible");
+        if (axisTimeLabel) {
+          axisTimeLabel.setAttribute("transform", "translate(" + Math.max(plotStart, Math.min(plotEnd - 110, x - 55)) + " 0)");
+          const date = new Date(timestamp * 1000).toISOString();
+          axisTimeLabel.querySelector("[data-crosshair-axis-date]").textContent = date.slice(0, 10);
+          axisTimeLabel.querySelector("[data-crosshair-axis-time]").textContent = date.slice(11, 16) + " UTC";
+          axisTimeLabel.setAttribute("visibility", "visible");
+        }
         if (priceLabel) {
-          const price = update.values[0];
+          const price = activePriceCursor?.chartIndex === chartIndex ? activePriceCursor.value : update.values[0];
           const y = valueAtPosition(price, Number(svg.getAttribute("data-chart-min")),
             Number(svg.getAttribute("data-chart-max")), plotTop, plotBottom);
           if (y === null) {
@@ -785,8 +1065,8 @@ function bindSynchronizedCrosshair(panel, pair) {
             horizontal.setAttribute("y1", String(y));
             horizontal.setAttribute("y2", String(y));
             horizontal.setAttribute("visibility", "visible");
-            const labelY = Math.max(2, Math.min(88, y - 7));
-            priceLabel.querySelector("[data-crosshair-price]").textContent = formatNumber(price, 8);
+            const labelY = Math.max(plotTop, Math.min(plotBottom - 14, y - 7));
+            priceLabel.querySelector("[data-crosshair-price]").textContent = formatChartValue(price, true);
             priceLabel.setAttribute("transform", "translate(0 " + (labelY - 2) + ")");
           }
           priceLabel.setAttribute("visibility", "visible");
@@ -833,11 +1113,33 @@ function bindSynchronizedCrosshair(panel, pair) {
     const chartIndex = chartElements.indexOf(svg);
     if (chartIndex < 0) return;
     const bounds = svg.getBoundingClientRect();
+    activePriceCursor = svg.getAttribute("data-chart-role") === "price" ? {
+      chartIndex, value: valueAtClientY(event.clientY, bounds, Number(svg.getAttribute("data-chart-viewbox-height")),
+        Number(svg.getAttribute("data-chart-plot-top")), Number(svg.getAttribute("data-chart-plot-bottom")),
+        Number(svg.getAttribute("data-chart-min")), Number(svg.getAttribute("data-chart-max")))
+    } : null;
     const position = positionAtClientX(event.clientX, bounds,
       Number(svg.getAttribute("data-chart-viewbox-width")),
       Number(svg.getAttribute("data-chart-plot-start")), Number(svg.getAttribute("data-chart-plot-end")));
     if (position !== null) controller.selectAt(chartIndex, position);
   }
+}
+
+function fitChartText(panel) {
+  panel.querySelectorAll(".indicator-chart-svg").forEach(function (svg) {
+    const bounds = svg.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const scaleX = bounds.width / Number(svg.getAttribute("data-chart-viewbox-width"));
+    const scaleY = bounds.height / Number(svg.getAttribute("data-chart-viewbox-height"));
+    // SVG geometry fills the card, but labels should not become horizontally stretched.
+    const correction = Math.max(0.45, Math.min(1.4, scaleY / scaleX));
+    svg.querySelectorAll("text").forEach(function (text) {
+      const anchor = text.getAttribute("text-anchor");
+      text.style.transformBox = "fill-box";
+      text.style.transformOrigin = (anchor === "end" ? "100%" : anchor === "middle" ? "50%" : "0%") + " 50%";
+      text.style.transform = "scaleX(" + correction + ")";
+    });
+  });
 }
 
 function renderCard(pair) {
@@ -961,6 +1263,8 @@ function renderTokenRow(pair) {
 }
 
 function render() {
+  chartResizeObservers.forEach(observer => observer.disconnect());
+  chartResizeObservers = [];
   document.getElementById("pair-count").textContent =
     pairs.length + (pairs.length === 1 ? " пара" : " пар") +
     (automaticPairs.length ? " · автоскан: " + automaticPairs.length : " · автоскан активний");
@@ -975,9 +1279,13 @@ function render() {
     '<div class="empty">Список порожній. Додайте контракт Gate.io Futures.</div>';
   cardsNode.querySelectorAll("[data-token]").forEach(function (row) {
     row.addEventListener("toggle", function () {
+      if (!row.isConnected) return;
       const pair = row.getAttribute("data-token");
       if (row.open) openTokens.add(pair);
       else openTokens.delete(pair);
+      const previous = whaleState.status;
+      ensureWhaleContext();
+      if (row.open && previous !== whaleState.status) render();
     });
   });
   cardsNode.querySelectorAll("[data-chart-pair]").forEach(function (panel) {
@@ -1015,6 +1323,8 @@ function render() {
       if (typeof visibleWallTracker !== "undefined") visibleWallTracker.remove(pair);
       delete visualizationCrosshairTimes[pair];
       openVisualizations.delete(pair);
+      openLayerMenus.delete(pair);
+      cancelUnusedWhaleRequest();
       savePairs();
       saveVisualizationSelections();
       saveOpenInterestSelections();
@@ -1033,7 +1343,40 @@ function render() {
         ensureVisualizationData(pair, selectedVisualizationInterval(pair));
         ensureFundingHistory(pair);
       }
+      ensureWhaleContext();
       render();
+    });
+  });
+  cardsNode.querySelectorAll("[data-layer-menu]").forEach(function (menu) {
+    menu.addEventListener("toggle", function () {
+      if (!menu.isConnected) return;
+      const pair = menu.getAttribute("data-layer-menu");
+      if (menu.open) openLayerMenus.add(pair);
+      else openLayerMenus.delete(pair);
+    });
+  });
+  cardsNode.querySelectorAll("[data-chart-layer]").forEach(function (input) {
+    input.addEventListener("change", function () {
+      const key = input.getAttribute("data-chart-layer");
+      if (Object.hasOwn(chartLayers, key) && typeof chartLayers[key] === "boolean") {
+        applyChartLayers({ ...chartLayers, [key]: input.checked });
+      }
+    });
+  });
+  cardsNode.querySelectorAll("[data-whale-mode]").forEach(function (select) {
+    select.addEventListener("change", function () {
+      applyChartLayers({ ...chartLayers, whaleMode: select.value });
+    });
+  });
+  cardsNode.querySelectorAll("[data-chart-cvd]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      const pair = button.getAttribute("data-chart-cvd");
+      const target = [...cardsNode.querySelectorAll("[data-cvd-toggle]")].find(node =>
+        node.getAttribute("data-cvd-toggle") === pair);
+      if (target) {
+        target.click();
+        if (target.getAttribute("aria-expanded") === "true") target.scrollIntoView({ block: "start", behavior: "smooth" });
+      }
     });
   });
   cardsNode.querySelectorAll("[data-chart-count]").forEach(function (select) {
@@ -1128,6 +1471,7 @@ function refreshOpenVisualizations() {
     ensureVisualizationData(contract, selectedVisualizationInterval(contract));
     ensureFundingHistory(contract);
   });
+  ensureWhaleContext();
 }
 
 function formatFunding(data) {
@@ -1574,5 +1918,13 @@ syncVisualizationControls();
 render();
 scan();
 window.setInterval(scan, POLL_MS);
-window.addEventListener("pagehide", function () { cvdAnalysis.dispose(); });
-window.addEventListener("pageshow", function () { cvdAnalysis.mount(cardsNode, pairs); });
+window.addEventListener("pagehide", function () {
+  cvdAnalysis.dispose();
+  whaleRequest?.controller.abort();
+  whaleRequest = null;
+  whaleState.status = whaleState.snapshot ? "ok" : "idle";
+});
+window.addEventListener("pageshow", function () { cvdAnalysis.mount(cardsNode, pairs); ensureWhaleContext(); });
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) { ensureWhaleContext(); render(); }
+});

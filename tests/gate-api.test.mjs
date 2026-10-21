@@ -1,9 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  clearCache, fetchCandles, fetchContractStats, fetchFundingHistory, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract,
+  clearCache, fetchCandles, fetchContractStats, fetchFundingHistory, fetchUsdcUsdtRate, fetchOrderBook, fetchTickers, fetchVisualizationCandles, normalizeContract,
   normalizeOrderBook, normalizeTicker, normalizeContractStats
 } from "../gate-api.mjs";
+
+test("USDC reference conversion uses actual Gate spot bid/ask, caches its original time and never assumes parity", async context => {
+  clearCache();
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; clearCache(); });
+  let calls = 0;
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url).searchParams.get("currency_pair"), "USDC_USDT");
+    calls++;
+    return { ok: true, json: async () => [{ currency_pair: "USDC_USDT", highest_bid: "1.01", lowest_ask: "1.03" }] };
+  };
+  const fx = await fetchUsdcUsdtRate();
+  assert.equal(fx.rate, 1.02);
+  assert.ok(Number.isFinite(fx.fetchedAt));
+  assert.deepEqual(await fetchUsdcUsdtRate(), fx);
+  assert.equal(calls, 1);
+  for (const row of [{ currency_pair: "USDC_USDT", highest_bid: null, lowest_ask: "1" },
+    { currency_pair: "USDC_USDT", highest_bid: "1.1", lowest_ask: "1" },
+    { currency_pair: "OTHER_USDT", highest_bid: "1", lowest_ask: "1" }]) {
+    clearCache();
+    globalThis.fetch = async () => ({ ok: true, json: async () => [row] });
+    await assert.rejects(fetchUsdcUsdtRate(), /USDC\/USDT/);
+  }
+});
 
 test("funding history retains settled timestamps and signed rates, never future or invalid points", async context => {
   clearCache();
