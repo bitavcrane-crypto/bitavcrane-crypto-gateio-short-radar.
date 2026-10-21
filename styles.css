@@ -29,6 +29,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .toolbar-meta { display: flex; align-items: center; gap: 12px; color: #8495aa; font-size: 12px; }
 .subtle-button { padding: 8px 10px; color: #aabbd0; background: #172232; border: 1px solid #2a3b50; font-size: 11px; }
 .subtle-button:hover { color: #edf2fa; background: #202e42; }
+.pilot-link { display: inline-block; border-radius: 8px; text-decoration: none; white-space: nowrap; }
 .notice { margin: 0 0 16px; padding: 12px 14px; color: #ffd694; background: #392d1b; border: 1px solid #644a26; border-radius: 10px; font-size: 13px; }
 .signal-summary { margin: 0 0 14px; padding: 12px 14px; color: #a9bad0; background: #111a27; border: 1px solid #29384a; border-radius: 10px; font-size: 13px; font-weight: 700; }
 .signal-summary.has-signals { color: #ffb0a4; background: #321e24; border-color: #633b3b; }
@@ -186,5 +187,7 @@ footer p { margin: 5px 0; }
 .cvd-timeframe dl { margin: 0; font-size: .8rem; }
 .cvd-timeframe dt { color: #9eacbf; margin-top: .5rem; }
 .cvd-timeframe dd { margin: .15rem 0; overflow-wrap: anywhere; }
+.cvd-stage-context { margin: 8px 0 0 !important; padding: 8px 10px; color: #f4d28a !important; border-left: 2px solid #e7b85f; background: #181f2b; }
+.events-note { margin: -4px 0 10px; color: #8fa1b8; font-size: 11px; }
 .cvd-status, .cvd-divergence { font-size: .85rem; overflow-wrap: anywhere; }
 .cvd-analysis select { color: inherit; background: #101722; margin: .75rem 0; padding: .35rem; }

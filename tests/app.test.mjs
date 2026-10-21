@@ -21,7 +21,8 @@ const renderPanel = runInNewContext(source.slice(start, end) + "\nrenderStrategy
     return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   },
   formatNumber: function (value) { return Number.isFinite(value) ? String(value) : "—"; },
-  formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; }
+  formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; },
+  formatCvdContext: function () { return "CVD Binance: потік не активовано."; }
 });
 
 function model() {
@@ -55,7 +56,7 @@ test("detected failed-high formation is not labelled a confirmed entry and repea
   assert.match(html, /SETUP DETECTED/);
   assert.doesNotMatch(html, /SHORT ENTRY дозволено|SETUP CONFIRMED/);
   assert.equal((html.match(/унікальна причина/g) || []).length, 1);
-  assert.equal((source.match(/renderStrategyPanel\(model\)/g) || []).length, 2);
+  assert.equal((source.match(/renderStrategyPanel\(model,/g) || []).length, 2);
 });
 
 test("market-stage evidence is displayed inside the existing strategy panel", function () {
@@ -114,8 +115,61 @@ test("funding UI shows the exact normalized strategy rate alongside its raw sour
   assert.match(formatFunding({ funding: { normalized: null } }), /UNKNOWN/);
 });
 
+test("CVD context stays informational and fails closed when the optional stream is unavailable", function () {
+  const format = runInNewContext(functionSource("formatCvdContext") + "\nformatCvdContext;", {
+    formatNumber: function (value) { return Number.isFinite(value) ? String(value) : "—"; },
+    formatPercent: function (value) { return Number.isFinite(value) ? value + "%" : "—"; }
+  });
+  assert.match(format(null), /відкрийте панель CVD/);
+  assert.match(format({ state: "UNAVAILABLE", reason: "STALE_TRADES", frames: {} }), /угоди застаріли/);
+  assert.match(format({ state: "UNAVAILABLE", frames: { "15m": {
+    state: "UNAVAILABLE", reason: "MINIMUM_BARS"
+  } } }), /потрібно щонайменше 9 завершених інтервалів/);
+  const context = format({ state: "AVAILABLE", frames: { "15m": {
+    state: "AVAILABLE", delta: -1200, priceChange: 0.8,
+    divergence: { status: "BEARISH" }
+  } } });
+  assert.match(context, /ціна зростає при чистих продажах/);
+  assert.match(context, /можливе поглинання, не сигнал/);
+  assert.match(context, /дивергенція: ведмежа/);
+  assert.match(context, /не самостійний SHORT-сигнал/);
+  const insufficient = format({ state: "AVAILABLE", frames: { "15m": {
+    state: "AVAILABLE", delta: 10, priceChange: -0.4,
+    divergence: { status: "INSUFFICIENT_DATA" }
+  } } });
+  assert.match(insufficient, /дивергенція: недостатньо даних/);
+});
+
+test("pilot simulator is explicitly fictional and scenario controls update the unified explanation", function () {
+  const html = readFileSync(new URL("../pilot.html", import.meta.url), "utf8");
+  assert.match(html, /СИМУЛЯЦІЯ · НЕ LIVE-ДАНІ · НЕ BACKTEST/);
+  assert.match(html, /Whale layer — не вигадуємо/);
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const fields = ["scenario-note", "price", "oi", "funding", "cvd", "book", "liquidations",
+    "price-note", "oi-note", "funding-note", "cvd-note", "book-note", "limits", "engine-state", "engine-reason"];
+  const nodes = new Map(fields.map(function (key) { return [key, { textContent: "" }]; }));
+  const buttons = ["pump", "distribution", "blocked"].map(function (scenario) {
+    return { dataset: { scenario }, attributes: {}, listeners: {}, setAttribute(key, value) {
+      this.attributes[key] = value;
+    }, addEventListener(key, callback) { this.listeners[key] = callback; } };
+  });
+  const document = {
+    querySelectorAll: function () { return buttons; },
+    getElementById: function (key) { return nodes.get(key); }
+  };
+  runInNewContext(script, { document });
+  assert.match(nodes.get("engine-state").textContent, /СПОСТЕРЕЖЕННЯ/);
+  buttons[1].listeners.click();
+  assert.match(nodes.get("cvd-note").textContent, /можливе поглинання/);
+  assert.match(nodes.get("engine-state").textContent, /WATCH/);
+  buttons[2].listeners.click();
+  assert.match(nodes.get("book").textContent, /ЗАСТАРІЛА/);
+  assert.match(nodes.get("engine-state").textContent, /NO TRADE/);
+});
+
 test("entry alerts require every mandatory gate and state changes, including same-candle recovery", function () {
-  const api = runInNewContext(functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
+  const api = runInNewContext(functionSource("signalStateLabel") + "\n" +
+    functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
     events: [], MAX_EVENTS: 12, window: {}
   });
   const value = { confirmed: true, strategy: { allowed: true, dataReady: true, blockers: [], missing: [] } };
@@ -131,6 +185,7 @@ test("entry alerts require every mandatory gate and state changes, including sam
   assert.equal(recovered.unchangedCandle, true);
   api.notifyChange("Q_USDT", "setup", "entry", recovered);
   assert.equal(api.getEvents().length, 1);
+  assert.match(api.getEvents()[0], /очікування підтвердження → SHORT підтверджено/);
   api.notifyChange("Q_USDT", "entry", "entry", recovered);
   assert.equal(api.getEvents().length, 1);
 });
@@ -140,9 +195,12 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   value.confirmed = true;
   value.strategy.allowed = true;
   value.strategy.dataReady = true;
+  value.data.visibleWalls = { status: "AVAILABLE", bid: { notionalUsd: 50000 } };
+  const removed = [];
   const models = { Q_USDT: value };
   const markUnavailable = runInNewContext(functionSource("markPairUnavailable") + "\nmarkPairUnavailable;", {
     models: models, pairErrors: {}, confirmationSettings: {},
+    visibleWallTracker: { remove: function (pair) { removed.push(pair); } },
     evaluateShortConfirmation: function () { return { state: "unavailable" }; }
   });
   markUnavailable("Q_USDT", "HTTP 429");
@@ -152,6 +210,21 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   assert.equal(models.Q_USDT.strategy.status, "DATA UNAVAILABLE");
   assert.equal(models.Q_USDT.stage.key, "insufficient");
   assert.equal(models.Q_USDT.stage.continuationRisk, "неможливо оцінити");
+  assert.equal(models.Q_USDT.data.visibleWalls.status, "UNAVAILABLE");
+  assert.deepEqual(removed, ["Q_USDT"]);
+});
+
+test("stale order books cannot display retained wall amounts or repetition counts", function () {
+  const format = runInNewContext(functionSource("formatVisibleWalls") + "\nformatVisibleWalls;", {
+    formatNumber: function (value) { return String(value); }
+  });
+  const summary = { status: "AVAILABLE", bid: {
+    notionalUsd: 50000, price: 99.9, observedSnapshots: 5, sampleCount: 6, persistent: true
+  }, ask: null };
+  assert.match(format(summary, { quality: "OK" }), /50000/);
+  const stale = format(summary, { quality: "STALE" });
+  assert.match(stale, /рівні приховано/);
+  assert.doesNotMatch(stale, /50000|5\/6/);
 });
 
 test("visualization crosshair shares pointer interaction across charts and resets on timeframe changes", function () {

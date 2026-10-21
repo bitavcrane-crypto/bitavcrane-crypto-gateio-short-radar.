@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151f">
+  <title>Пілот SHORT Radar · Симулятор</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0b1018;color:#edf2fa}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#172337 0,#0b1018 42rem)}
+    main{width:min(1040px,100%);margin:auto;padding:28px 18px 40px}
+    a{color:#8cecff}.eyebrow{color:#8ca4bf;font-size:11px;font-weight:800;letter-spacing:.14em}
+    h1{font-size:clamp(26px,5vw,42px);margin:8px 0}p{line-height:1.55;color:#a9bad0}
+    .demo{display:inline-block;padding:7px 10px;border:1px solid #986b2f;border-radius:999px;color:#ffd17c;background:#342819;font-size:11px;font-weight:900}
+    .scenarios{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0}
+    button,.back{border:1px solid #31445b;border-radius:9px;padding:10px 13px;background:#172232;color:#d7e2ef;font:inherit;font-weight:750;cursor:pointer;text-decoration:none}
+    button[aria-pressed=true]{background:#184737;border-color:#3c9d79;color:#8af0bf}
+    .notice{padding:12px 14px;border:1px solid #6b512d;border-radius:10px;background:#251e14;color:#ffd88c;font-weight:750}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}
+    .panel{padding:14px;border:1px solid #26364b;border-radius:12px;background:#111a27}
+    .panel h2{font-size:14px;margin:0 0 10px;color:#d7e2ef}
+    .value{font-size:19px;font-weight:850;color:#f2d48d}
+    .tag{display:inline-block;padding:4px 7px;border-radius:5px;background:#202e42;color:#a9bad0;font-size:10px;font-weight:800}
+    .good{color:#80e2b4}.warn{color:#ffd17c}.bad{color:#ffaaa2}
+    .engine{padding:16px;border:1px solid #754b42;border-radius:12px;background:linear-gradient(145deg,#2c2023,#111a27)}
+    .engine strong{display:block;color:#ffb9a5;font-size:18px;margin-bottom:6px}
+    .roadmap{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:9px;margin:14px 0 22px}
+    .step{padding:11px;border:1px solid #27364a;border-radius:9px;background:#101722}
+    .step strong{display:block;margin-bottom:5px}.step small{color:#91a2b8;line-height:1.5}
+    footer{margin-top:24px;padding-top:15px;border-top:1px solid #26364b;color:#8295ad;font-size:12px}
+    @media(max-width:650px){main{padding:22px 14px}.grid{grid-template-columns:1fr}.scenarios button{flex:1 1 100%}}
+  </style>
+</head>
+<body>
+<main>
+  <a class="back" href="index.html">← Повернутися до live-віджета</a>
+  <p class="eyebrow">SHORT RADAR · НАВЧАЛЬНИЙ ПІЛОТ</p>
+  <h1>Як система збирає докази</h1>
+  <span class="demo">СИМУЛЯЦІЯ · НЕ LIVE-ДАНІ · НЕ BACKTEST</span>
+  <p>Оберіть сценарій, щоб побачити, як Price, OI, Funding, потік угод і книга заявок взаємодіють. Усі числа нижче вигадані для демонстрації; сторінка не підключається до бірж і не генерує торгових сигналів.</p>
+  <div class="scenarios" role="group" aria-label="Сценарії">
+    <button type="button" data-scenario="pump" aria-pressed="true">1 · Памп триває</button>
+    <button type="button" data-scenario="distribution" aria-pressed="false">2 · Можливий розподіл</button>
+    <button type="button" data-scenario="blocked" aria-pressed="false">3 · Є пробій, але дані неповні</button>
+  </div>
+  <div class="notice" id="scenario-note" role="status" aria-live="polite"></div>
+  <section class="grid" aria-label="Показники сценарію">
+    <article class="panel"><h2>Ціна · 15m / 1h / 4h</h2><div class="value" id="price"></div><p id="price-note"></p></article>
+    <article class="panel"><h2>Відкритий інтерес (OI)</h2><div class="value" id="oi"></div><p id="oi-note"></p></article>
+    <article class="panel"><h2>Funding · нормалізований до 8h</h2><div class="value" id="funding"></div><p id="funding-note"></p></article>
+    <article class="panel"><h2>CVD · Binance USDⓈ-M</h2><div class="value" id="cvd"></div><p id="cvd-note"></p></article>
+    <article class="panel"><h2>Книга заявок · видимий зріз</h2><div class="value" id="book"></div><p id="book-note"></p></article>
+    <article class="panel"><h2>Ліквідації та великі гравці</h2><div class="value" id="liquidations"></div><p id="limits"></p></article>
+  </section>
+  <section class="engine">
+    <strong id="engine-state"></strong>
+    <span id="engine-reason"></span>
+    <p><b>Головне:</b> один індикатор або високий score не створює SHORT. Потрібні валідні дані, структура, закрите підтвердження, придатна ліквідність і коректні рівні ризику.</p>
+  </section>
+  <h2>Що реально є у віджеті</h2>
+  <section class="roadmap" aria-label="Статус етапів плану">
+    <div class="step"><strong class="good">1 · CVD / потік угод — є</strong><small>Публічний агресорний потік Binance; скидається після розриву. Це не потік виконань Gate.io.</small></div>
+    <div class="step"><strong class="good">2 · Price + OI + Funding — є</strong><small>CVD показаний окремим контекстом і не підміняє суворі правила SHORT.</small></div>
+    <div class="step"><strong class="warn">3 · Великі заявки — частково</strong><small>Показується повторна поява видимих великих рівнів у межах сесії (до 6 знімків). Скасування, прихована ліквідність і намір учасника не відомі.</small></div>
+    <div class="step"><strong class="warn">4 · Liquidation map — недоступна</strong><small>Публічні дані радара містять лише агрегати LONG/SHORT за 5 хвилин, не ціни примусових ліквідацій.</small></div>
+    <div class="step"><strong class="warn">5 · Whale layer — не вигадуємо</strong><small>Є агреговані позиції top-trader, але немає надійних ідентичностей гаманців чи «розумних грошей».</small></div>
+    <div class="step"><strong class="good">6 · SHORT engine — є</strong><small>Ціна/OI, якість джерел, squeeze-ризик, структура, книга й R/R працюють разом із блокуваннями.</small></div>
+    <div class="step"><strong class="warn">7 · Backtest — не підміняємо</strong><small>Журнал переходів зберігається у браузері; синхронного архіву CVD/OI/funding/book для чесного backtest немає.</small></div>
+  </section>
+  <footer>Для пілота використовуйте live-віджет, дочекайтеся кількох закритих інтервалів і звірте джерела. Симулятор не доводить прибутковість стратегії й не змінює сигнали.</footer>
+</main>
+<script>
+  const scenarios = {
+    pump: {
+      note: "Сценарій A: ціна й OI ростуть, CVD позитивний. Це продовження пампу, а не підстава шортити.",
+      price: "+2,4% / +8,1% / +16,0%", priceNote: "Зростання підтверджене закритими інтервалами; максимум не пробитий вниз.",
+      oi: "+3,2% за 1h", oiNote: "Нові позиції додаються. Напрям позицій сам по собі не розкриває намір учасників.",
+      funding: "+0,042% / 8h", fundingNote: "Позитивна ставка: LONG платять SHORT; це опис ціни утримання, не сигнал.",
+      cvd: "+$1,8 млн", cvdNote: "Агресивні BUY переважають у цьому вигаданому 15m інтервалі.",
+      book: "Bid $42k · Ask $55k", bookNote: "Навчальний знімок: стійкість стін не вимірювалася.",
+      liquidations: "LONG $8k · SHORT $31k", limits: "Лише агрегат; карти рівнів немає. Whale/address даних немає.",
+      state: "СПОСТЕРЕЖЕННЯ · SHORT НЕ ПІДТВЕРДЖЕНО", reason: "Висхідний імпульс і позитивний CVD суперечать передчасному SHORT."
+    },
+    distribution: {
+      note: "Сценарій B: ціна ще тримається, але CVD показує чисті продажі. Це попередження для нагляду, не підтверджений розворот.",
+      price: "+0,3% / +1,1% / +9,4%", priceNote: "Підтримка не пробита; активний тренд ще не зламаний.",
+      oi: "+4,7% за 1h", oiNote: "OI росте під час уповільнення ціни: контекст позиціонування, не доказ дистрибуції.",
+      funding: "+0,078% / 8h", fundingNote: "LONG платять SHORT; висока ставка не замінює price confirmation.",
+      cvd: "−$940 тис.", cvdNote: "Ціна зростає, а чистий потік продажів від’ємний: можливе поглинання; потрібне подальше підтвердження.",
+      book: "Bid $18k · Ask $64k", bookNote: "Одноразова різниця може зникнути зі скасуванням заявок; стійкість не доведена.",
+      liquidations: "LONG $14k · SHORT $9k", limits: "Агрегат за вікно, не ціна ліквідацій. Whale/address даних немає.",
+      state: "WATCH · СТРУКТУРА НЕ ПІДТВЕРДЖЕНА", reason: "Потрібне закриття нижче локальної підтримки та перевірка повноти даних."
+    },
+    blocked: {
+      note: "Сценарій C: схоже на пробій, але книга застаріла. Двигун має заблокувати висновок, а не домислити дані.",
+      price: "−2,2% / −1,4% / +7,0%", priceNote: "Є короткий пробій; 4h контекст лишається висхідним.",
+      oi: "+0,8% за 1h", oiNote: "Price ↓ + OI ↑ може означати відкриття позицій, але не встановлює сторону.",
+      funding: "+0,025% / 8h", fundingNote: "Показано лише як контекст; напрям SHORT не доведено.",
+      cvd: "−$2,1 млн", cvdNote: "Продажі посилюються у симуляції, але не скасовують обов’язкові перевірки.",
+      book: "ЗАСТАРІЛА", bookNote: "Без свіжої книги не можна підтвердити spread, depth або slippage.",
+      liquidations: "Немає ціни рівнів", limits: "Ліквідаційна карта й достовірний whale-layer відсутні.",
+      state: "NO TRADE · ДАНІ НЕПОВНІ", reason: "Старий order book блокує підтвердження незалежно від CVD, score або пробою."
+    }
+  };
+  function show(key) {
+    const item = scenarios[key];
+    document.querySelectorAll("[data-scenario]").forEach(function (button) {
+      button.setAttribute("aria-pressed", String(button.dataset.scenario === key));
+    });
+    document.getElementById("scenario-note").textContent = item.note;
+    ["price","oi","funding","cvd","book","liquidations","price-note","oi-note","funding-note","cvd-note","book-note","limits"].forEach(function (field) {
+      const keyName = field.replace("-note", "Note").replace("limits", "limits").replace("state", "state").replace("reason", "reason");
+      document.getElementById(field).textContent = item[keyName] || item[field];
+    });
+    document.getElementById("engine-state").textContent = item.state;
+    document.getElementById("engine-reason").textContent = item.reason;
+  }
+  document.querySelectorAll("[data-scenario]").forEach(function (button) {
+    button.addEventListener("click", function () { show(button.dataset.scenario); });
+  });
+  show("pump");
+</script>
+</body>
+</html>

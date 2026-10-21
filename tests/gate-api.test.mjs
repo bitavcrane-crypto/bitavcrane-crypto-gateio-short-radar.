@@ -88,6 +88,12 @@ test("order book requests use the futures contract and normalize executable dept
   assert.equal(book.quality, "OK");
   assert.ok(book.spreadPercent > 0);
   assert.equal(book.depthUsd, 99.9);
+  assert.equal(book.bidLevels[0].price, 99.9);
+  assert.equal(book.bidLevels[0].size, 100);
+  assert.ok(Math.abs(book.bidLevels[0].notionalUsd - 99.9) < 1e-8);
+  assert.equal(book.askLevels[0].price, 100.1);
+  assert.equal(book.askLevels[0].size, 100);
+  assert.ok(Math.abs(book.askLevels[0].notionalUsd - 100.1) < 1e-8);
   assert.equal(book.slippagePercent, null);
   assert.ok(book.fetchedAt >= beforeRequest && book.fetchedAt <= afterRequest);
   assert.equal(normalizeOrderBook(rawBook, null, 12345).quality, "INCOMPLETE");

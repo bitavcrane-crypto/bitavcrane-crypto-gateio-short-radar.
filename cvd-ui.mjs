@@ -117,7 +117,7 @@ export function renderCvdSnapshot(snapshot, selected = "15m", chart, sourceLabel
 }
 
 export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdStore, createFeed = createBinanceTradeFeed,
-  setEvery = setInterval, clearEvery = clearInterval } = {}) {
+  setEvery = setInterval, clearEvery = clearInterval, onSnapshot = () => {} } = {}) {
   const open = new Map();
   let hosts = new Map();
   let feed = null;
@@ -134,6 +134,7 @@ export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdSto
       const snapshot = store.snapshot(contract, Date.now()) || {
         state: "UNAVAILABLE", reason: "Немає достовірного множника контракту для обчислення USDT-обсягу."
       };
+      try { onSnapshot(contract, snapshot); } catch { /* Optional context cannot break CVD rendering. */ }
       content.innerHTML = renderCvdSnapshot(snapshot, open.get(contract), chart);
     } catch {
       content.innerHTML = '<p role="status">ERROR · CVD недоступний. Основний радар працює незалежно.</p>';
@@ -143,6 +144,7 @@ export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdSto
   function stop(contract) {
     open.delete(contract);
     try { feed?.unsubscribe(contract); } catch { /* CVD cannot disable the radar. */ }
+    try { onSnapshot(contract, null); } catch { /* Optional context cannot break CVD shutdown. */ }
     if (!open.size && timer !== null) {
       clearEvery(timer);
       timer = null;
@@ -242,5 +244,10 @@ export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdSto
     hosts.clear();
   }
 
-  return { mount, dispose };
+  function snapshot(contract) {
+    if (!store || !open.has(contract)) return null;
+    try { return store.snapshot(contract, Date.now()); } catch { return null; }
+  }
+
+  return { mount, dispose, snapshot };
 }

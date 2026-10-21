@@ -183,6 +183,12 @@ export function normalizeOrderBook(book, contractMultiplier, fetchedAtMs) {
     depthWindowPercent: 0.5,
     bidDepthUsd: bidDepth,
     askDepthUsd: askDepth,
+    bidLevels: bids.map(function (level) {
+      return { price: level.price, size: level.size, notionalUsd: level.price * level.size * multiplier };
+    }),
+    askLevels: asks.map(function (level) {
+      return { price: level.price, size: level.size, notionalUsd: level.price * level.size * multiplier };
+    }),
     executionNotionalUsd: 1000,
     timestampQuality: timestampQuality
   };
