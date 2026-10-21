@@ -1,5 +1,5 @@
 export const DEFAULT_CHART_LAYERS = Object.freeze({
-  ema: true, obv: true, volume: true, oi: true, funding: true,
+  ema: true, rci: true, obv: true, volume: true, oi: true, funding: true,
   oiChange: false, topOi: true, whales: true, whaleMode: "levels"
 });
 

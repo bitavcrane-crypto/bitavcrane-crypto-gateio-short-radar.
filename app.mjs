@@ -31,7 +31,7 @@ const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const EVENTS_KEY = "gate-short-radar-signal-events-v1";
 const CHART_LAYERS_KEY = "gate-short-radar-chart-layers-v1";
 const DEFAULT_VISUALIZATION_SETTINGS = {
-  rci: { periods: [6, 12, 24] }, ema: { periods: [200, 55, 22] }
+  rci: { periods: [6, 12, 24], upper: 95, lower: 5 }, ema: { periods: [200, 55, 22] }
 };
 const POLL_MS = 60000;
 const MAX_EVENTS = 12;
@@ -102,8 +102,21 @@ function normalizeVisualizationSettings(value) {
       return Number.isInteger(candidate) && candidate >= minimum && candidate <= maximum ? candidate : fallback;
     });
   }
+  const rci = value && value.rci || {};
+  function level(key) {
+    const raw = rci[key];
+    const candidate = typeof raw === "number" || typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+    return Number.isFinite(candidate) && candidate >= -100 && candidate <= 100 ?
+      candidate : DEFAULT_VISUALIZATION_SETTINGS.rci[key];
+  }
+  let upper = level("upper");
+  let lower = level("lower");
+  if (lower >= upper) {
+    upper = DEFAULT_VISUALIZATION_SETTINGS.rci.upper;
+    lower = DEFAULT_VISUALIZATION_SETTINGS.rci.lower;
+  }
   return {
-    rci: { periods: periodList("rci", "periods", DEFAULT_VISUALIZATION_SETTINGS.rci.periods, 2, 100) },
+    rci: { periods: periodList("rci", "periods", DEFAULT_VISUALIZATION_SETTINGS.rci.periods, 2, 100), upper, lower },
     ema: { periods: periodList("ema", "periods", DEFAULT_VISUALIZATION_SETTINGS.ema.periods, 2, 500) }
   };
 }
@@ -491,7 +504,8 @@ function currentTickerPrice(model) {
 
 function renderChartLayerMenu(pair) {
   const choices = [
-    ["ema", "EMA на ціні · Gate"], ["obv", "OBV · не CVD"], ["volume", "Обсяг · Gate"],
+    ["ema", "EMA на ціні · Gate"], ["rci", "RCI · три криві · Gate"],
+    ["obv", "OBV · не CVD"], ["volume", "Обсяг · Gate"],
     ["oi", "Відкритий інтерес · Gate"], ["oiChange", "Зміна OI · фактична різниця 5m"],
     ["funding", "Funding · фактичні ставки Gate"], ["topOi", "LONG / SHORT OI топтрейдерів · у деталях"],
     ["whales", "Середні входи великих позицій · Hyperliquid"]
@@ -614,9 +628,14 @@ function chartSvg(seriesList, options) {
     return '<rect x="0" y="' + y(zone.to) + '" width="' + plotEnd + '" height="' +
       Math.max(0, y(zone.from) - y(zone.to)) + '" fill="' + zone.color + '"/>';
   }).join("") : "";
-  const guides = (options.guides || []).map(function (value) {
+  const guides = (options.guides || []).map(function (guide) {
+    const value = typeof guide === "number" ? guide : guide.value;
+    const color = typeof guide === "number" ? "#4c5b6c" : guide.color || "#4c5b6c";
     return '<line x1="0" y1="' + y(value) + '" x2="' + plotEnd + '" y2="' + y(value) +
-      '" stroke="#4c5b6c" stroke-dasharray="4 4"/>';
+      '" stroke="' + escapeHtml(color) + '" stroke-dasharray="4 4" data-guide-value="' + value + '"/>' +
+      (typeof guide === "object" && guide.label ? '<text class="chart-guide-label" x="8" y="' +
+        (y(value) + 11) + '" fill="' + escapeHtml(color) + '" font-size="10">' +
+        escapeHtml(guide.label) + '</text>' : "");
   }).join("");
   const markers = (options.markers || []).map(function (index) {
     const markerTimes = options.times || options.domainTimes;
@@ -778,7 +797,8 @@ function renderIndicatorVisualization(pair) {
   if (!data.candles || !data.candles.length) {
     return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
   }
-  const view = buildIndicatorVisualization(data.candles, currentChartSettings(), Math.floor(Date.now() / 1000),
+  const chartSettings = currentChartSettings();
+  const view = buildIndicatorVisualization(data.candles, chartSettings, Math.floor(Date.now() / 1000),
     VISUALIZATION_INTERVALS[interval], 600);
   if (view.status === "incomplete") {
     return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
@@ -799,6 +819,28 @@ function renderIndicatorVisualization(pair) {
   const chartDomainTimes = whaleLayer.domainTimes;
   const chartEndTime = chartTimes[chartTimes.length - 1];
   const rci = indicators.rci;
+  const rciLevels = {
+    upper: chartSettings.rci.upper ?? 95,
+    lower: chartSettings.rci.lower ?? 5
+  };
+  const rciColors = ["#77c8ff", "#49d4a5", "#f18c8c"];
+  const rciContent = chartLayers.rci ? '<p class="chart-summary">' + rci.lines.map(function (line, index) {
+    return '<span style="color:' + rciColors[index % rciColors.length] + '">RCI(' + line.period +
+      ') <strong>' + formatNumber(line.value, 1) + '</strong></span>';
+  }).join(" · ") + '</p><p class="chart-footnote">Шкала −100…+100 · верхній рівень <strong>' +
+    formatNumber(rciLevels.upper, 1) + '</strong> · нижній рівень <strong>' +
+    formatNumber(rciLevels.lower, 1) + '</strong>. Рівні — візуальні орієнтири, не сигнал входу.</p>' +
+    chartSvg(rci.lines.map(function (line, index) {
+      return { values: visibleValues(line.values), color: rciColors[index % rciColors.length],
+        label: "RCI " + line.period, digits: 2, times: chartTimes };
+    }), {
+      min: -100, max: 100, times: chartTimes, domainTimes: chartDomainTimes,
+      label: "RCI · " + rci.periods.join(" / "),
+      guides: [
+        { value: rciLevels.upper, color: "#f18c8c", label: "Верхній " + formatNumber(rciLevels.upper, 1) },
+        { value: rciLevels.lower, color: "#49d4a5", label: "Нижній " + formatNumber(rciLevels.lower, 1) }
+      ]
+    }) + '<p class="chart-footnote">Це RCI, не RSI. Періоди та рівні змінюються в «Параметри графіків» над списком токенів. Значення у підписі — для останньої закритої свічки; курсор показує вибрану свічку. Правила SHORT та допоміжне підтвердження не змінені.</p>' : "";
   const obv = indicators.obv;
   const obvContent = !obv.volumeAvailable ?
     '<p class="chart-empty">Немає даних для OBV · відсутній повний обсяг.</p>' :
@@ -868,6 +910,8 @@ function renderIndicatorVisualization(pair) {
     whaleLayer.note + '<p class="chart-footnote">Шкали часу — UTC. Праворуч — ціна або одиниці відповідного індикатора. Торкніться графіка для точних значень.</p>' +
     '<div class="indicator-chart-grid">' +
     '<section class="indicator-chart-card"><h4>Ціна · USDT' + (chartLayers.ema ? " / EMA · " + ema.periods.join(" / ") : "") + "</h4>" + emaContent + "</section>" +
+    (chartLayers.rci ? '<section class="indicator-chart-card" data-rci-panel="' + escapeHtml(pair) +
+      '"><h4>RCI · ' + rci.periods.join(" / ") + "</h4>" + rciContent + "</section>" : "") +
     (chartLayers.obv ? '<section class="indicator-chart-card"><h4>OBV · SMA / Δ ' + obv.lookback + "</h4>" + obvContent + "</section>" : "") + "</div>" +
     (chartLayers.volume && model && model.data ? (function () {
       const recent = chartCandles;
@@ -1625,7 +1669,7 @@ function syncConfirmationControls() {
 function syncVisualizationControls() {
   document.querySelectorAll("[data-vis-period]").forEach(function (input) {
     const path = input.dataset.visPeriod.split(".");
-    input.value = path[0] === "rci" || path[0] === "ema" ?
+    input.value = /^\d+$/.test(path[1]) ?
       visualizationSettings[path[0]].periods[Number(path[1])] :
       visualizationSettings[path[0]][path[1]];
   });
@@ -1633,11 +1677,22 @@ function syncVisualizationControls() {
 
 function readVisualizationControls() {
   const value = { rci: { periods: [] }, ema: { periods: [] } };
-  document.querySelectorAll("[data-vis-period]").forEach(function (input) {
+  const inputs = Array.from(document.querySelectorAll("[data-vis-period]"));
+  inputs.forEach(function (input) { input.setCustomValidity(""); });
+  for (const input of inputs) {
+    if (!input.checkValidity()) { input.reportValidity(); return; }
+  }
+  inputs.forEach(function (input) {
     const path = input.dataset.visPeriod.split(".");
-    if (path[0] === "rci" || path[0] === "ema") value[path[0]].periods[Number(path[1])] = input.value;
+    if (/^\d+$/.test(path[1])) value[path[0]].periods[Number(path[1])] = input.value;
     else value[path[0]][path[1]] = input.value;
   });
+  if (Number(value.rci.lower) >= Number(value.rci.upper)) {
+    const lower = inputs.find(function (input) { return input.dataset.visPeriod === "rci.lower"; });
+    lower.setCustomValidity("Нижній рівень RCI має бути меншим за верхній.");
+    lower.reportValidity();
+    return;
+  }
   visualizationSettings = normalizeVisualizationSettings(value);
   try {
     localStorage.setItem(VISUALIZATION_SETTINGS_KEY, JSON.stringify(visualizationSettings));

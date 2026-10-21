@@ -559,7 +559,45 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     return { globals, ...api };
   }
 
-  test("600-bar chart viewport keeps EMA/OBV time-value alignment and omits redundant oscillator plots", function () {
+  test("RCI panel has three adjustable curves, exact +95/+5 guides and an independent display toggle", function () {
+    const now = Math.floor(Date.now() / 900000) * 900;
+    const candles = Array.from({ length: 600 }, (_, index) => ({
+      time: now - (600 - index) * 900, open: 100, close: 100 + Math.sin(index / 5),
+      low: 98, high: 102, volume: 100 + index
+    }));
+    const calls = [];
+    const harness = visualizationHarness({
+      visualizationData: { Q_USDT: { "15m": { candles, updatedAt: Date.now() } } },
+      chartWindows: { Q_USDT: { count: 48, offset: 24 } },
+      currentTickerPrice: () => null, formatNumber: String, hasBullishFourHourTrend: () => false,
+      currentChartSettings: () => ({
+        rci: { periods: [6, 12, 24], upper: 95, lower: 5 },
+        ema: { periods: [22] }, obv: { lookback: 10 }, kdj: { period: 9, ma1: 3, ma2: 3 }
+      }),
+      chartSvg: (series, options) => { calls.push({ series, options }); return "<svg></svg>"; }
+    });
+    const html = harness.renderIndicatorVisualization("Q_USDT");
+    assert.match(html, /data-rci-panel="Q_USDT"/);
+    assert.match(html, /<h4>RCI · 6 \/ 12 \/ 24/);
+    const rci = calls.find(call => call.options.label.startsWith("RCI"));
+    assert.equal(rci.series.length, 3);
+    assert.equal(rci.options.min, -100);
+    assert.equal(rci.options.max, 100);
+    assert.deepEqual(Array.from(rci.options.guides, guide => guide.value), [95, 5]);
+    const full = buildIndicatorVisualization(candles, harness.globals.currentChartSettings(), now, 900, 600);
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(Array.from(rci.series[i].values), full.indicators.rci.lines[i].values.slice(528, 576));
+      assert.equal(rci.series[i].times.at(-1), candles[575].time);
+    }
+    harness.globals.chartLayers.rci = false;
+    calls.length = 0;
+    const hidden = harness.renderIndicatorVisualization("Q_USDT");
+    assert.doesNotMatch(hidden, /data-rci-panel/);
+    assert.equal(calls.some(call => call.options.label.startsWith("RCI")), false);
+    assert.match(hidden, /<h4>Ціна/);
+  });
+
+  test("600-bar chart viewport keeps RCI/EMA/OBV aligned and leaves KDJ without a separate panel", function () {
     const seconds = 900;
     const now = Math.floor(Date.now() / 1000 / seconds) * seconds;
     const candles = Array.from({ length: 600 }, (_, index) => ({
@@ -576,7 +614,8 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     });
     const html = harness.renderIndicatorVisualization("Q_USDT");
     assert.match(html, /600 закритих/);
-    assert.doesNotMatch(html, /<h4>RCI|<h4>KDJ/);
+    assert.match(html, /<h4>RCI/);
+    assert.doesNotMatch(html, /<h4>KDJ/);
     assert.ok(calls.length >= 2);
     for (const call of calls) for (const series of call.series) {
       assert.equal(series.values.length, series.times.length);
