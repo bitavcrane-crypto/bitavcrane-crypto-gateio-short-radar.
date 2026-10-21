@@ -1,5 +1,5 @@
 import { createCvdStore } from "./cvd.mjs";
-import { createGateTradeFeed } from "./gate-api.mjs";
+import { createBinanceTradeFeed } from "./binance-api.mjs";
 
 const TIMEFRAMES = ["15m", "1h", "4h"];
 const STATE_LABELS = {
@@ -46,7 +46,7 @@ function timestamp(value) {
   return Number.isFinite(value) ? new Date(value).toLocaleString("uk-UA", { timeZone: "UTC" }) + " UTC" : "—";
 }
 
-export function renderCvdSnapshot(snapshot, selected = "15m", chart) {
+export function renderCvdSnapshot(snapshot, selected = "15m", chart, sourceLabel = "Binance USDⓈ-M Futures") {
   const state = snapshot?.state || "LOADING";
   const usable = state === "AVAILABLE";
   const frames = snapshot?.frames || {};
@@ -100,6 +100,8 @@ export function renderCvdSnapshot(snapshot, selected = "15m", chart) {
   }
   return '<p class="cvd-status" role="status">' + escape(state) + " · " + escape(STATE_LABELS[state] || state) +
     " · " + escape(reason(snapshot?.reason) || "Очікуємо перевірені дані угод.") + '</p>' +
+    '<p class="quality-note">Джерело: ' + escape(sourceLabel) +
+    ' · Binance агрегує угоди з однаковою ціною та стороною приблизно за 100 мс; RPI-угоди не мають окремої позначки.</p>' +
     '<p class="quality-note">Остання угода: ' + escape(timestamp(snapshot?.lastTradeAt)) +
     '. Свіжі ≤30 с; DELAYED >30 с; UNAVAILABLE >120 с. Якість: ' +
     (usable ? "перевірені напрямок і повнота" : "непридатна для напрямного висновку") + '.</p>' +
@@ -114,7 +116,7 @@ export function renderCvdSnapshot(snapshot, selected = "15m", chart) {
     'Півот: 2 закриті інтервали зліва та справа; негативна Δ сама по собі не є дивергенцією.</p>';
 }
 
-export function createCvdAnalysis({ chart, getMultiplier, createStore = createCvdStore, createFeed = createGateTradeFeed,
+export function createCvdAnalysis({ chart, getSymbol, createStore = createCvdStore, createFeed = createBinanceTradeFeed,
   setEvery = setInterval, clearEvery = clearInterval } = {}) {
   const open = new Map();
   let hosts = new Map();
@@ -154,7 +156,7 @@ export function createCvdAnalysis({ chart, getMultiplier, createStore = createCv
         store = createStore();
         feed = createFeed({ store: store });
       }
-      feed.subscribe(contract, getMultiplier?.(contract));
+      feed.subscribe(contract, getSymbol?.(contract));
       if (timer === null) timer = setEvery(function () { open.forEach(function (_, pair) { update(pair); }); }, 5000);
       update(contract);
     } catch {
@@ -215,12 +217,12 @@ export function createCvdAnalysis({ chart, getMultiplier, createStore = createCv
         }
         const expanded = open.has(contract);
         host.innerHTML = '<button type="button" class="visualization-toggle" data-cvd-toggle="' + escape(contract) +
-          '" aria-expanded="' + expanded + '">CVD / Графік</button>' +
-          '<p class="quality-note">Лише аналіз · не впливає на PUMP / EXHAUSTION / SHORT та торгові рівні.</p>' +
+          '" aria-expanded="' + expanded + '">CVD Binance / Графік</button>' +
+          '<p class="quality-note">Публічний потік Binance USDⓈ-M, не потік Gate.io · лише контекстний аналіз · не впливає на PUMP / EXHAUSTION / SHORT та торгові рівні.</p>' +
           '<div data-cvd-content' + (expanded ? "" : " hidden") + "></div>";
         hosts.set(contract, host);
         if (expanded) {
-          try { feed?.subscribe(contract, getMultiplier?.(contract)); } catch { /* Keep rendering other pairs. */ }
+          try { feed?.subscribe(contract, getSymbol?.(contract)); } catch { /* Keep rendering other pairs. */ }
           update(contract);
         }
       });

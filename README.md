@@ -8,23 +8,40 @@
 
 Початковий ручний список: `BTC_USDT`, `ETH_USDT`, `SOL_USDT`. Автоскан що хвилини переглядає тикери активних USDT perpetual і тимчасово аналізує до 12 контрактів, для яких API надав зміну за 24 години щонайменше `5%` і quote-обсяг щонайменше `250,000 USDT`. Це лише попередній фільтр кандидатів, не сигнал і не ранжування готових SHORT: фінальне сортування використовує повні оцінки моделі. Якщо будь-яке з потрібних числових полів відсутнє або некоректне, контракт не додається автоматично. Картки позначають автоматично знайдені пари; ✕ прибирає пару з поточного списку та приховує автоматичну пару, доки вона знову не вийде з попереднього фільтра. Щоб додати пару вручну, введіть точний символ (наприклад, `RAVE_USDT`) і натисніть «Додати пару». Ручна пара додається тільки якщо присутня серед активних контрактів USDT Gate.io; ручний список зберігається у `localStorage`, а автоматичні кандидати — ні.
 
-## CVD V1 · лише аналіз · перевірка напрямку заблокована
+## CVD V1 · Binance USDⓈ-M · лише аналіз; Gate CVD заблокований
 
-Кнопка **«CVD / Графік»** під кожною парою відкриває незалежний аналіз 15m / 1h / 4h.
+Кнопка **«CVD Binance / Графік»** під кожною парою відкриває незалежний аналіз 15m / 1h / 4h.
 Модуль не передає даних у PUMP, EXHAUSTION, SHORT, entry, invalidation, stop або TP.
 Старі ключі та формати `localStorage` не змінюються; окремі угоди не зберігаються.
 
-**Незавершений критерій приймання:** у цьому середовищі офіційний сайт документації
-Gate недоступний через DNS. Чинні офіційні SDK підтверджують поля публічних угод, але
-не пояснюють, чий напрямок позначає знак `size`. Тому production-адаптер має
-`GATE_CVD_SEMANTICS.verified = false`: показує `UNAVAILABLE` з українською причиною,
-не вгадує taker-side за знаком, ціною, tick rule або непідтвердженим `side`, і не запускає
-марний транспорт. Користувацького обходу перевірки немає. До підтвердження офіційної
-семантики live-напрямок CVD та live-дивергенції **не доступні**.
+Live-потік для CVD надходить лише з публічного Binance USDⓈ-M Futures `aggTrade`, а не з
+Gate.io. Символ Gate на кшталт `BTC_USDT` зіставляється лише з точним Binance `BTCUSDT`
+після перевірки `/fapi/v1/exchangeInfo`: контракт має бути активним `TRADING`
+`PERPETUAL` з `quoteAsset=USDT` і `marginAsset=USDT`. У Binance `m` означає
+«покупець є maker»: `m=true` класифікується як агресивний SELL, `m=false` — BUY.
+USDT-notional обчислюється як `price × quantity`. Це **контекстний потік Binance**,
+не показник потоку виконань на Gate і не рекомендація щодо угоди.
+
+Binance агрегує виконання з однаковою ціною та стороною приблизно за 100 мс; RPI-угоди
+включені без окремої позначки. Тому показник не є журналом кожного окремого виконання.
+REST-історія не домішується до WebSocket-сесії. При розриві transport історію CVD
+скинуто, а прогрів починається знову; неповні інтервали не підтверджують дивергенцію.
+
+**Gate-native CVD залишається заблокованим:** доступні офіційні SDK підтверджують поля
+публічних Gate-угод, але не пояснюють, чий напрямок позначає знак `size`. Тому
+`GATE_CVD_SEMANTICS.verified = false`: Gate adapter показує `UNAVAILABLE`, не вгадує
+taker-side за знаком, ціною, tick rule або непідтвердженим `side`, і не запускає
+марний Gate transport. Binance feed є окремим джерелом і не змінює цей блокер.
 Перевірені нормалізовані fixtures тестують обчислювальний модуль і транспорт окремо.
 
 Джерела, перевірені 2026-10-21:
 
+- [Binance USDⓈ-M Aggregate Trade Streams](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/public):
+  `m` позначає «buyer is maker», `p` — price, `q` — quantity, `T` — trade time;
+  однакові ціни та taking side агрегуються приблизно за 100 мс, а RPI не має окремого тегу.
+- [Binance USDⓈ-M REST Market Data](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data):
+  `/fapi/v1/exchangeInfo` публікує symbol, status, contractType, quoteAsset і marginAsset;
+  WebSocket під’єднується до `/public/stream` і підписується на `symbol@aggTrade`.
 - [Офіційний WS SDK: поля `FuturesTrade`](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/go/response_future.go#L35-L48):
   `id`, `create_time`, `create_time_ms`, `contract`, `size`, `price`; поле `taker_side` у цій схемі не визначене.
 - [Офіційний REST SDK: `FuturesTrade`](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesTrade.md):
