@@ -122,6 +122,9 @@ test("CVD context stays informational and fails closed when the optional stream 
   });
   assert.match(format(null), /відкрийте панель CVD/);
   assert.match(format({ state: "UNAVAILABLE", reason: "STALE_TRADES", frames: {} }), /угоди застаріли/);
+  assert.match(format({ state: "UNAVAILABLE", frames: { "15m": {
+    state: "UNAVAILABLE", reason: "MINIMUM_BARS"
+  } } }), /потрібно щонайменше 9 завершених інтервалів/);
   const context = format({ state: "AVAILABLE", frames: { "15m": {
     state: "AVAILABLE", delta: -1200, priceChange: 0.8,
     divergence: { status: "BEARISH" }
@@ -130,6 +133,11 @@ test("CVD context stays informational and fails closed when the optional stream 
   assert.match(context, /можливе поглинання, не сигнал/);
   assert.match(context, /дивергенція: ведмежа/);
   assert.match(context, /не самостійний SHORT-сигнал/);
+  const insufficient = format({ state: "AVAILABLE", frames: { "15m": {
+    state: "AVAILABLE", delta: 10, priceChange: -0.4,
+    divergence: { status: "INSUFFICIENT_DATA" }
+  } } });
+  assert.match(insufficient, /дивергенція: недостатньо даних/);
 });
 
 test("pilot simulator is explicitly fictional and scenario controls update the unified explanation", function () {
@@ -160,7 +168,8 @@ test("pilot simulator is explicitly fictional and scenario controls update the u
 });
 
 test("entry alerts require every mandatory gate and state changes, including same-candle recovery", function () {
-  const api = runInNewContext(functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
+  const api = runInNewContext(functionSource("signalStateLabel") + "\n" +
+    functionSource("notifyChange") + "\n({ notifyChange, getEvents: () => events });", {
     events: [], MAX_EVENTS: 12, window: {}
   });
   const value = { confirmed: true, strategy: { allowed: true, dataReady: true, blockers: [], missing: [] } };
@@ -176,6 +185,7 @@ test("entry alerts require every mandatory gate and state changes, including sam
   assert.equal(recovered.unchangedCandle, true);
   api.notifyChange("Q_USDT", "setup", "entry", recovered);
   assert.equal(api.getEvents().length, 1);
+  assert.match(api.getEvents()[0], /очікування підтвердження → SHORT підтверджено/);
   api.notifyChange("Q_USDT", "entry", "entry", recovered);
   assert.equal(api.getEvents().length, 1);
 });

@@ -259,7 +259,18 @@ function formatCvdContext(snapshot) {
       STALE_TRADES: "угоди застаріли",
       PARTIAL_COVERAGE: "інтервал покритий не повністю",
       INVALID_TRADE: "некоректна угода; безперервність потоку втрачена",
-      INVALID_AGGREGATE: "підсумок угод некоректний"
+      INVALID_AGGREGATE: "підсумок угод некоректний",
+      PROVISIONAL: "15-хв інтервал ще не завершено",
+      SESSION_STARTED: "почалася нова сесія; історія прогрівається",
+      COVERAGE_RESET: "неперервність потоку скинута",
+      HISTORY_LIMIT: "досягнуто ліміту історії; потрібен повторний прогрів",
+      ID_CAPACITY: "досягнуто ліміту ID угод; потрібен повторний прогрів",
+      MINIMUM_BARS: "потрібно щонайменше 9 завершених інтервалів",
+      MINIMUM_TRADES: "потрібно щонайменше 20 угод",
+      INCOMPLETE_OR_INVALID_BARS: "інтервали неповні або некоректні",
+      GAPPED_BARS: "в історії є пропуски інтервалів",
+      INCOMPLETE_COVERAGE: "покриття недостатнє для підтвердження",
+      INVALID_INPUT: "вхідні дані непридатні"
     };
     return "CVD Binance: " + (reasonLabels[reasonCode] || reasonCode || "даних 15m недостатньо") +
       " · не впливає на оцінку SHORT.";
@@ -275,7 +286,8 @@ function formatCvdContext(snapshot) {
   }
   const divergence = frame.divergence && frame.divergence.status;
   const divergenceLabel = divergence === "BEARISH" ? "ведмежа" :
-    divergence === "BULLISH" ? "бичача" : "немає";
+    divergence === "BULLISH" ? "бичача" :
+      divergence === "INSUFFICIENT_DATA" ? "недостатньо даних" : "не визначена";
   const divergenceText = divergence && divergence !== "NONE" ?
     " · дивергенція: " + divergenceLabel : "";
   return "CVD Binance 15m: Δ " + formatNumber(delta, 0) + " USDT; ціна " +
@@ -1039,12 +1051,28 @@ function formatFunding(data) {
     " · " + (funding.fetchedAt ? new Date(funding.fetchedAt).toLocaleTimeString("uk-UA") : "час невідомий");
 }
 
+function signalStateLabel(state) {
+  const labels = {
+    new: "нова пара",
+    none: "спокійний ринок",
+    watch: "ранній рух",
+    pump: "памп формується",
+    hot: "перегрів",
+    exhaustion: "виснаження",
+    setup: "очікування підтвердження",
+    entry: "SHORT підтверджено",
+    incomplete: "дані недоступні",
+    cancelled: "SHORT скасовано"
+  };
+  return labels[state] || "стан змінено";
+}
+
 function notifyChange(pair, oldState, newState, model) {
   if (!oldState || oldState === newState || newState === "incomplete" || newState === "none") return;
   if (newState === "entry" && (!model || !model.confirmed || !model.strategy ||
       !model.strategy.allowed || !model.strategy.dataReady || model.strategy.blockers.length ||
       model.strategy.missing.length)) return;
-  const message = pair + ": " + oldState.toUpperCase() + " → " + newState.toUpperCase();
+  const message = pair + ": " + signalStateLabel(oldState) + " → " + signalStateLabel(newState);
   events.unshift(new Date().toLocaleString("uk-UA") + " · " + message);
   events = events.slice(0, MAX_EVENTS);
   try { localStorage.setItem(EVENTS_KEY, JSON.stringify(events)); } catch (error) {
