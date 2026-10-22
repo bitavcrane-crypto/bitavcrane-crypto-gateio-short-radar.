@@ -8,7 +8,8 @@ import { normalizeContract, normalizeContractStats, normalizeOrderBook, normaliz
 import { buildOpenInterestSeries } from "../oi-visualization.mjs";
 import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
 import { chartWindow, contextSeries, formatLevelPrice } from "../radar-presentation.mjs";
-import { axisTicks, timeAxisTicks, formatChartValue, layoutAxisLabels, normalizeChartLayers } from "../chart-tools.mjs";
+import { axisTicks, timeAxisTicks, formatChartValue, layoutAxisLabels, normalizeChartLayers, oiChangeRows } from "../chart-tools.mjs";
+import { buildGateContext, indicatorState } from "../gate-context.mjs";
 import { WHALE_COHORT } from "../hyperliquid-cohort.mjs";
 import { freshWhaleSnapshot, hyperliquidCoin, normalizeWhaleHistory, recordWhaleHistory, whaleHistorySeries } from "../hyperliquid.mjs";
 import {
@@ -120,6 +121,8 @@ function whaleHarness(overrides = {}) {
     Date: class extends Date { static now() { return now; } }, AbortController, POLL_MS: 60000,
     pairs: ["BTC_USDT", "ETH_USDT"], openVisualizations: new Set(["BTC_USDT"]), openTokens: new Set(["BTC_USDT"]),
     chartLayers: normalizeChartLayers(null), openLayerMenus: new Set(), WHALE_COHORT,
+    models: {}, visualizationData: {}, statsRequests: {}, pairErrors: {}, fundingHistory: {}, fundingRequests: {},
+    selectedVisualizationInterval: () => "15m", VISUALIZATION_INTERVALS, buildGateContext, indicatorState, oiChangeRows,
     whaleState: { status: "idle", snapshot: null }, whaleRequest: null,
     whaleHistory: normalizeWhaleHistory(null, now / 1000), WHALE_HISTORY_KEY: "history",
     whaleClient: { snapshot: async () => value },
@@ -230,8 +233,37 @@ test("indicator selector distinguishes actual Gate/HL layers from unavailable tr
   const html = whaleHarness().renderChartLayerMenu("BTC_USDT");
   assert.match(html, /data-chart-layer="whales"/);
   assert.match(html, /Історія знімків цього пристрою/);
-  assert.match(html, /disabled><span>Команда токена/);
-  assert.match(html, /не правила SHORT/);
+  assert.doesNotMatch(html, /type="checkbox" disabled/);
+  assert.match(html, /не докази входів команди токена/);
+  assert.match(html, /не змінюють правила SHORT/);
+  assert.match(html, /data-chart-layer="taker"/);
+  assert.match(html, /data-chart-layer="liquidations"/);
+  assert.match(html, /layer-state layer-/);
+});
+
+test("Gate context renders without candles, uses actual aggregate timestamps and respects switches", () => {
+  const time = Math.floor(Date.now() / 300000) * 300 - 900;
+  const rows = [0, 1].map(i => ({ time: time + i * 300, longTakerVolume: 10 + i,
+    shortTakerVolume: 4, longLiquidationSize: 0, shortLiquidationSize: 2 }));
+  const charts = [];
+  const layers = normalizeChartLayers(null);
+  const render = runInNewContext(functionSource("renderGateContext") + "\nrenderGateContext;", {
+    chartLayers: layers, models: { Q_USDT: { data: { stats: { quality: "OK" }, oiVisualizationHistory: rows } } },
+    buildGateContext, escapeHtml: String, formatCrosshairTime: String, formatNumber: String,
+    chartSvg: (series, options) => { charts.push({ series, options }); return "<svg></svg>"; }
+  });
+  const html = render("Q_USDT");
+  assert.match(html, /Потік угод · Gate/);
+  assert.match(html, /не нові відкриття позицій/);
+  assert.match(html, /не карту майбутніх|Не прогноз майбутніх/);
+  assert.equal(charts.length, 5);
+  assert.deepEqual(Array.from(charts[2].series[0].values), [6, 13]);
+  assert.deepEqual(Array.from(charts[2].options.domainTimes), rows.map(row => row.time));
+  assert.deepEqual(Array.from(charts[3].series[0].values), [0, 0]);
+  layers.taker = false;
+  assert.doesNotMatch(render("Q_USDT"), /class="indicator-chart-card gate-flow"/);
+  layers.liquidations = false;
+  assert.equal(render("Q_USDT"), "");
 });
 
 test("entry overlays have real axis labels and missing entries never become zero-priced dashed lines", () => {
@@ -427,8 +459,8 @@ test("OI chart timeframe is independent and optional LONG/SHORT fields are descr
   assert.match(source, /buildOpenInterestSeries\(data && data\.oiVisualizationHistory \|\| \[\], openInterestInterval/);
   assert.match(source, /label: "TOP LONG OI · contracts"/);
   assert.match(source, /label: "TOP SHORT OI · contracts"/);
-  assert.match(source, /Якщо Gate повертає top_long_size і top_short_size/);
-  assert.match(source, /документовані поля окремими серіями TOP LONG\/SHORT OI у контрактах/);
+  assert.match(source, /Gate: top_long_size і top_short_size/);
+  assert.match(source, /Показуються лише фактично отримані поля/);
   assert.doesNotMatch(source, /За Gate, top_long_size/);
   assert.match(source, /times: oiTimes, domainTimes: oiTimes/);
   assert.match(readFileSync(new URL("../styles.css", import.meta.url), "utf8"), /\.oi-legend \.oi-long::before[^}]*#49d4a5/);
@@ -563,7 +595,7 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     const globals = {
       pairs: ["Q_USDT"], visualizationData: {}, visualizationRequests: {}, POLL_MS: 60000,
       VISUALIZATION_INTERVALS, OPEN_INTEREST_INTERVALS, AbortController, normalizeCandles: null,
-      models: {}, buildOpenInterestSeries, buildIndicatorVisualization,
+      models: {}, buildOpenInterestSeries, buildIndicatorVisualization, buildGateContext,
       chartWindows: {}, chartWindow, contextSeries, fundingHistory: {},
       chartLayers: normalizeChartLayers(null), renderChartLayerMenu: () => "",
       renderWhaleLayer: (_, times) => ({ domainTimes: times, references: [], series: [], note: "" }),
@@ -584,7 +616,7 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
     const end = source.indexOf("\nfunction refreshOpenVisualizations(", start);
     const api = runInNewContext(
       source.slice(start, end) + "\n" + functionSource("renderOpenInterestVisualization") + "\n" +
-      functionSource("renderIndicatorVisualization") +
+      functionSource("renderIndicatorVisualization") + "\n" + functionSource("renderGateContext") +
       "\n({ ensureVisualizationData, cancelVisualizationRequest, renderIndicatorVisualization, renderOpenInterestVisualization });",
       globals
     );
@@ -987,8 +1019,8 @@ test("absent optional top fields are named unavailable instead of inferred from 
   const html = harness.renderOpenInterestVisualization("Q_USDT");
   assert.match(html, /LONG: UNAVAILABLE · немає даних поля top_long_size/);
   assert.match(html, /SHORT: UNAVAILABLE · немає даних поля top_short_size/);
-  assert.match(html, /Якщо Gate повертає top_long_size і top_short_size/);
-  assert.match(html, /фактична наявність полів у live-відповіді не перевірена/);
+  assert.match(html, /Gate: top_long_size і top_short_size/);
+  assert.match(html, /Показуються лише фактично отримані поля/);
   assert.match(html, /TOP LONG OI · contracts/);
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /gate\/gateapi-python\/blob\/master\/docs\/ContractStat\.md/);

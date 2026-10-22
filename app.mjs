@@ -3,6 +3,7 @@ import { fetchCandles, fetchContracts, fetchContractStats, fetchFundingHistory, 
 import { DEFAULT_CONFIRMATION_SETTINGS, evaluateShortConfirmation, normalizeConfirmationSettings } from "./indicator-confirmation.mjs";
 import { buildIndicatorVisualization } from "./indicator-visualization.mjs";
 import { buildOpenInterestSeries } from "./oi-visualization.mjs";
+import { buildGateContext, indicatorState } from "./gate-context.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createVisibleWallTracker } from "./wall-monitor.mjs";
@@ -501,33 +502,89 @@ function currentTickerPrice(model) {
     ticker.last : null;
 }
 
-function renderChartLayerMenu(pair) {
+function renderChartLayerMenu(pair, view = null) {
+  const now = Date.now() / 1000;
+  const data = models[pair]?.data;
+  const rows = data?.oiVisualizationHistory || [];
+  const interval = selectedVisualizationInterval(pair);
+  const visual = visualizationData[pair]?.[interval];
+  const gate = buildGateContext(rows, now);
+  const count = values => (values || []).filter(Number.isFinite).length;
+  const chartState = (enabled, lines) => indicatorState({
+    enabled, loading: !visual || visual.loading, error: visual?.error ||
+      (view?.status === "incomplete" ? "У свічках є пропуск; індикатор не розраховується через нього." : null),
+    points: lines?.length ? Math.min(...lines.map(line => count(line.values))) : 0,
+    latestTime: view?.latestCandleTime + VISUALIZATION_INTERVALS[interval],
+    nowSeconds: now, maxAge: VISUALIZATION_INTERVALS[interval] * 2
+  });
+  const fieldState = (enabled, field, source = rows) => {
+    const valid = source.filter(row => Number.isFinite(row[field]));
+    return indicatorState({ enabled, loading: !!statsRequests[pair], points: valid.length,
+      error: pairErrors[pair] || (data?.stats?.quality && data.stats.quality !== "OK" ?
+        "Джерело Gate позначене як " + data.stats.quality + "; показано лише історію." : null),
+      latestTime: valid.at(-1)?.time, nowSeconds: now, maxAge: 900 });
+  };
+  const coin = hyperliquidCoin(pair);
+  const snapshot = whaleState.snapshot;
+  const whaleView = snapshot?.coins?.[coin];
+  const whalePoints = ["long", "short"].filter(side => Number.isFinite(whaleView?.[side]?.entry)).length;
+  const funding = fundingHistory[pair];
+  const states = {
+    ema: chartState(chartLayers.ema, view?.indicators?.ema.lines),
+    rci: chartState(chartLayers.rci, view?.indicators?.rci.lines),
+    obv: chartState(chartLayers.obv, [{ values: view?.indicators?.obv.values }]),
+    volume: chartState(chartLayers.volume, [{ values: view?.candles?.map(row => row.volume) }]),
+    oi: fieldState(chartLayers.oi, "openInterest"),
+    oiChange: fieldState(chartLayers.oiChange, "change", oiChangeRows(rows)),
+    topOi: fieldState(chartLayers.topOi, "available", rows.map(row => ({ time: row.time,
+      available: Number.isFinite(row.topLongOpenInterest) && Number.isFinite(row.topShortOpenInterest) ? 1 : null }))),
+    taker: fieldState(chartLayers.taker, "delta", gate),
+    liquidations: fieldState(chartLayers.liquidations, "available", gate.map(row => ({ time: row.time,
+      available: Number.isFinite(row.longLiquidations) && Number.isFinite(row.shortLiquidations) ? 1 : null }))),
+    funding: indicatorState({ enabled: chartLayers.funding, loading: !!fundingRequests[pair],
+      points: (funding?.rows || []).filter(row => Number.isFinite(row.ratePercent)).length,
+      error: funding?.error }),
+    whales: indicatorState({ enabled: chartLayers.whales, loading: whaleState.status === "loading",
+      points: whalePoints, required: 1, latestTime: snapshot?.oldestTime / 1000, nowSeconds: now, maxAge: 120,
+      error: whaleState.error || (snapshot && (!Number.isFinite(whaleState.fx?.rate) ||
+        !Number.isFinite(whaleState.fx?.fetchedAt) || Date.now() - whaleState.fx.fetchedAt > 120000) ?
+        "Немає свіжого курсу USDC/USDT; поточні лінії приховано." : null),
+      unavailableReason: !coin ? "Немає перевіреного зіставлення пари з Hyperliquid." :
+        snapshot && !snapshot.activeCoins.includes(coin) ? "Цього контракту немає в основному переліку Hyperliquid." :
+        snapshot && !whalePoints ? "У вибірці немає позицій цього токена від 1 млн USDC." : "" })
+  };
   const choices = [
     ["ema", "EMA на ціні · Gate"], ["rci", "RCI · три криві · Gate"],
     ["obv", "OBV · не CVD"], ["volume", "Обсяг · Gate"],
     ["oi", "Відкритий інтерес · Gate"], ["oiChange", "Зміна OI · фактична різниця 5m"],
-    ["funding", "Funding · фактичні ставки Gate"], ["topOi", "LONG / SHORT OI топтрейдерів · у деталях"],
+    ["funding", "Funding · фактичні ставки Gate"], ["topOi", "LONG / SHORT OI топтрейдерів · Gate"],
+    ["taker", "Потік покупок / продажів і CVD · Gate · агрегати 5m"],
+    ["liquidations", "Фактичні ліквідації LONG / SHORT · Gate"],
     ["whales", "Середні входи великих позицій · Hyperliquid"]
   ];
   return '<details class="chart-layer-menu" data-layer-menu="' + escapeHtml(pair) + '"' +
     (openLayerMenus.has(pair) ? " open" : "") + '><summary>Індикатори · ' +
     choices.filter(item => chartLayers[item[0]]).length + '</summary><div class="chart-layer-options">' +
-    '<p>Ціна / свічки — завжди. Ці перемикачі змінюють лише графіки, не правила SHORT.</p>' +
+    '<p>Прапорець запитує показ графіка. Стан нижче пояснює, чи є дані. Перемикачі не змінюють правила SHORT.</p>' +
     choices.map(function ([key, label]) {
+      const state = states[key];
       return '<label><input type="checkbox" data-chart-layer="' + key + '" data-layer-pair="' +
-        escapeHtml(pair) + '"' + (chartLayers[key] ? " checked" : "") + '><span>' + label + "</span></label>";
+        escapeHtml(pair) + '"' + (chartLayers[key] ? " checked" : "") + '><span class="layer-copy"><span>' +
+        label + '</span><strong class="layer-state layer-' + state.kind + '">' + escapeHtml(state.label) +
+        '</strong><small>' + escapeHtml(state.detail) + "</small></span></label>";
     }).join("") +
     '<label>Лінії Hyperliquid <select data-whale-mode="' + escapeHtml(pair) + '">' +
     '<option value="levels"' + (chartLayers.whaleMode === "levels" ? " selected" : "") + '>Поточні рівні</option>' +
     '<option value="history"' + (chartLayers.whaleMode === "history" ? " selected" : "") + '>Історія знімків цього пристрою</option></select></label>' +
-    '<button type="button" class="subtle-button" data-chart-cvd="' + escapeHtml(pair) + '">CVD Binance · окреме джерело</button>' +
-    '<details class="unavailable-indicators"><summary>Що зі скриншота поки недоступне</summary>' +
-    ["Реальні входи / виходи та дії китів", "Команда токена / smart money", "Кити проти всього ринку",
-      "Net Longs / Net Shorts за потоком угод", "Історія лістингів", "Карта майбутніх ліквідацій"].map(label =>
-      '<label><input type="checkbox" disabled><span>' + label + "</span></label>").join("") +
-    '<p>Для цих функцій немає підтвердженого повного джерела в поточному віджеті. ' +
-    'Зміна розміру позиції між двома знімками не доводить, які саме угоди відбулися між ними. ' +
-    'Агрегати Gate не підміняють індивідуальні позиції.</p></details></div></details>';
+    '<button type="button" class="subtle-button" data-chart-cvd="' + escapeHtml(pair) + '">Додатковий CVD Binance · не потрібен для Gate</button>' +
+    '<details class="unavailable-indicators"><summary>Межі даних — чого цей віджет не показує</summary>' +
+    '<p>Gate не відкриває індивідуальні позиції користувачів. Агрегати топтрейдерів і taker-потік — не докази входів команди токена, smart money чи всіх китів.</p>' +
+    '<p>Покупка може відкривати LONG або закривати SHORT; продаж — навпаки. CVD та зміна OI не визначають окремо всі нові LONG / SHORT.</p>' +
+    '<p>Показано лише фактичні минулі ліквідації, не карту майбутніх. Hyperliquid — окрема біржа й обмежена вибірка, не позиції Gate.</p>' +
+    (data?.contractInfo?.launchTime ? '<p>Початок торгів цим ф’ючерсом Gate (launch_time): <strong>' +
+      escapeHtml(formatCrosshairTime(data.contractInfo.launchTime)) + '</strong>. Це не дата першого лістингу токена на всіх біржах.</p>' :
+      '<p>Gate не повернув дату запуску цього ф’ючерсу. Перша свічка не підміняє дату лістингу.</p>') +
+    '</details></div></details>';
 }
 
 function renderWhaleLayer(pair, chartTimes, historical) {
@@ -780,31 +837,31 @@ function renderIndicatorVisualization(pair) {
   const cacheTime = data && data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString("uk-UA") : "немає";
   const lastCandle = data && data.candles && data.candles.length ?
     new Date(data.candles[data.candles.length - 1].time * 1000).toLocaleString("uk-UA") : "немає";
-  const header = '<div class="visualization-heading"><strong>' + escapeHtml(pair) +
+  const header = view => '<div class="visualization-heading"><strong>' + escapeHtml(pair) +
     ' · Gate.io · ціна / обсяг / OI / funding · ' + interval + '</strong><label>Таймфрейм <select data-visualization-timeframe="' +
     escapeHtml(pair) + '" aria-label="Таймфрейм графіків ' + escapeHtml(pair) + '">' +
     Object.keys(VISUALIZATION_INTERVALS).map(function (item) {
       return '<option value="' + item + '"' + (item === interval ? " selected" : "") + ">" + item + "</option>";
-    }).join("") + '</select></label></div>' + renderChartLayerMenu(pair);
+    }).join("") + '</select></label></div>' + renderChartLayerMenu(pair, view);
   if (!data || data.loading || (!data.candles && !data.error)) {
-    return header + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>" + oiPanel;
+    return header() + '<p class="visualization-message">Завантаження свічок ' + interval + "…</p>" + oiPanel + renderGateContext(pair);
   }
   if (data.error && (!data.candles || !data.candles.length)) {
-    return header + '<p class="visualization-message">Дані тимчасово недоступні · ' +
-      escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" + oiPanel;
+    return header() + '<p class="visualization-message">Дані тимчасово недоступні · ' +
+      escapeHtml(data.error) + " · останнє успішне оновлення: " + cacheTime + "</p>" + oiPanel + renderGateContext(pair);
   }
   if (!data.candles || !data.candles.length) {
-    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
+    return header() + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel + renderGateContext(pair);
   }
   const chartSettings = currentChartSettings();
   const view = buildIndicatorVisualization(data.candles, chartSettings, Math.floor(Date.now() / 1000),
     VISUALIZATION_INTERVALS[interval], 600);
   if (view.status === "incomplete") {
-    return header + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
-      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>' + oiPanel;
+    return header(view) + '<div class="visualization-meta">Остання свічка: ' + escapeHtml(lastCandle) +
+      " · дані оновлено: " + cacheTime + '</div><p class="visualization-message">Недостатньо історії для розрахунку · у послідовності свічок є пропуск або некоректна мітка часу.</p>' + oiPanel + renderGateContext(pair);
   }
   if (view.status !== "ok") {
-    return header + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel;
+    return header(view) + '<p class="visualization-message">Недостатньо історії для розрахунку.</p>' + oiPanel + renderGateContext(pair);
   }
   const indicators = view.indicators;
   const model = models[pair];
@@ -887,7 +944,7 @@ function renderIndicatorVisualization(pair) {
     "Базовий радар очікує дані. Графіки не змінюють його сигнали.";
   const stale = Math.floor(Date.now() / 1000) - (view.latestCandleTime + VISUALIZATION_INTERVALS[interval]) >=
     VISUALIZATION_INTERVALS[interval];
-  return header + (stale || (data.quality && data.quality !== "OK") ?
+  return header(view) + (stale || (data.quality && data.quality !== "OK") ?
     '<p class="visualization-message">Стан свічок: ' + escapeHtml(stale ? "STALE" : data.quality) +
       " · показано історичні дані, не поточне підтвердження.</p>" : "") +
     (data.error ? '<p class="visualization-message">Дані тимчасово недоступні · показано останній успішний набір · ' +
@@ -922,7 +979,7 @@ function renderIndicatorVisualization(pair) {
           color: "#e8b86d", label: "Обсяг", digits: 2, times: recentTimes
         }], { label: "Обсяг контрактів, " + interval, times: recentTimes, domainTimes: chartDomainTimes, bars: true }) + "</section></div>";
     })() : "") + renderMarketContext(pair, chartDomainTimes) +
-    (chartLayers.topOi ? '<details class="technical-details"><summary>Додатково: позиції топтрейдерів (лише за наявності даних)</summary>' + oiPanel + "</details>" : "") +
+    (chartLayers.topOi ? oiPanel : "") + renderGateContext(pair, chartDomainTimes) +
     '<div class="visualization-crosshair-time" data-chart-time role="status">Час свічки: ' +
     escapeHtml(formatCrosshairTime(chartEndTime)) + "</div>" +
     '<p class="visualization-summary">' + escapeHtml(summary) +
@@ -977,7 +1034,56 @@ function renderOpenInterestVisualization(pair) {
         label: "Top trader long/short open interest у контрактах, " + openInterestInterval,
         times: oiTimes, domainTimes: oiTimes
       }) : "")) +
-    '<p class="chart-footnote">Якщо Gate повертає top_long_size і top_short_size, графік показує ці документовані поля окремими серіями TOP LONG/SHORT OI у контрактах. Чинна схема ContractStat Python SDK Gate описує OI топтрейдерів, а не всього ринку; фактична наявність полів у live-відповіді не перевірена. Загальний open_interest та lsr_account/lsr_taker/top_lsr_size не підміняють ці серії. Інтервал формується останнім 5m знімком у кожному завершеному вікні лише за повної послідовності поля; пропуски не інтерполюються. Час знімків джерела не є часом останньої агрегованої точки.</p></section>';
+    '<p class="chart-footnote">Gate: top_long_size і top_short_size — відкриті позиції топтрейдерів у контрактах, не всього ринку й не нові входи. Показуються лише фактично отримані поля. Інтервал формується останнім 5m знімком у завершеному вікні за повної послідовності; пропуски не інтерполюються.</p></section>';
+}
+
+function renderGateContext(pair, domainTimes = null) {
+  if (!chartLayers.taker && !chartLayers.liquidations) return "";
+  const data = models[pair]?.data;
+  const rows = buildGateContext(data?.oiVisualizationHistory || [], Date.now() / 1000);
+  const range = domainTimes?.length ? domainTimes : rows.map(row => row.time);
+  const visible = rows.filter(row => row.time >= range[0] && row.time <= range.at(-1));
+  const times = visible.map(row => row.time);
+  const draw = (series, label, bars = false) => series.some(line => line.values.filter(Number.isFinite).length >= 2) ?
+    chartSvg(series.map(line => ({ ...line, times, digits: 2 })), { times, domainTimes: times, label, bars }) :
+    '<p class="chart-empty">Недостатньо фактичних завершених 5m точок у вибраному діапазоні. Спробуйте 5m або 15m. Невідомі значення не замінюються нулями.</p>';
+  const latest = rows.filter(row => Number.isFinite(row.delta)).at(-1);
+  const status = data?.stats?.quality === "OK" ? "" :
+    '<p class="chart-empty"><strong>Джерело Gate застаріле або неповне. Це історія, не поточне підтвердження.</strong></p>';
+  let flow = "";
+  if (chartLayers.taker) {
+    const lastVisible = visible.filter(row => Number.isFinite(row.cumulative)).at(-1);
+    const segments = [...new Set(visible.filter(row => row.segment !== null).map(row => row.segment))];
+    flow = '<section class="indicator-chart-card gate-flow"><h4>Потік угод · Gate · завершені агрегати 5m</h4>' + status +
+      '<p class="chart-summary"><strong>Агресивні покупки − продажі, не нові відкриття позицій.</strong></p>' +
+      (latest ? '<p class="chart-footnote">Останній доступний завершений агрегат: ' + escapeHtml(formatCrosshairTime(latest.time)) +
+        ' · покупки ' + formatNumber(latest.buy, 2) + ' · продажі ' + formatNumber(latest.sell, 2) +
+        ' · Δ ' + formatNumber(latest.delta, 2) + ' контрактів. Цей підсумок може бути новішим за вибране вікно.</p>' : "") +
+      draw([{ label: "Taker покупки · контракти", color: "#49d4a5", values: visible.map(row => row.buy) },
+        { label: "Taker продажі · контракти", color: "#f18c8c", values: visible.map(row => row.sell) }],
+        "Taker покупки та продажі · Gate · контракти / 5m") +
+      '<h4>Дельта потоку · контракти / 5m</h4>' +
+      draw([{ label: "Δ taker · контракти / 5m", color: "#e8b86d", values: visible.map(row => row.delta) }],
+        "Дельта taker Gate · контракти / 5m", true) +
+      '<h4>CVD Gate · накопичена дельта 5m · контракти</h4>' +
+      draw(segments.map(segment => ({ label: "CVD Gate · сегмент " + segment, color: "#71a5d2",
+        values: visible.map(row => row.segment === segment ? row.cumulative : null) })),
+        "CVD Gate · сума дельт завершених агрегатів 5m") +
+      '<p class="chart-footnote">Джерело: Gate contract_stats, long_taker_size / short_taker_size. Це не тік-by-тік CVD Binance і не USD-обсяг. ' +
+      'Кожна неперервна послідовність починається від нуля перед першим доступним агрегатом; після пропуску база скидається. ' +
+      'При оновленні ковзного вікна база може зміщуватися. Часова шкала цього блоку охоплює лише доступні агрегати вибраного діапазону, не стискає основний графік ціни. ' +
+      (lastVisible ? 'Останній сегмент у вибраному вікні: ' + escapeHtml(formatCrosshairTime(rows.find(row => row.segment === lastVisible.segment)?.time)) + '.' : "") +
+      ' Не самостійний SHORT-сигнал; не змінює оцінку, Entry, Stop чи TP.</p></section>';
+  }
+  const liquidation = chartLayers.liquidations ?
+    '<section class="indicator-chart-card gate-liquidations"><h4>Фактичні ліквідації · Gate · контракти / 5m</h4>' + status +
+    '<p class="chart-summary"><strong>Події, що вже сталися. Не прогноз майбутніх ліквідацій.</strong></p>' +
+    draw([{ label: "Ліквідовано LONG · контракти", color: "#f18c8c", values: visible.map(row => row.longLiquidations) }],
+      "Фактичні ліквідації LONG · Gate", true) +
+    draw([{ label: "Ліквідовано SHORT · контракти", color: "#49d4a5", values: visible.map(row => row.shortLiquidations) }],
+      "Фактичні ліквідації SHORT · Gate", true) +
+    '<p class="chart-footnote">Gate long_liq_size / short_liq_size. Нуль означає нуль зафіксованих контрактів у цьому агрегаті; пропуск — відсутність даних. Не визначає ліквідаційні ціни всього ринку.</p></section>' : "";
+  return '<div class="indicator-chart-grid gate-context-charts">' + flow + liquidation + "</div>";
 }
 
 function renderMarketContext(pair, domainTimes) {
@@ -1840,6 +1946,7 @@ async function scan() {
         });
         model.data.visibleWalls = visibleWalls;
         model.data.oiVisualizationHistory = stats.rows;
+        model.data.contractInfo = contractMap.get(pair) || null;
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);

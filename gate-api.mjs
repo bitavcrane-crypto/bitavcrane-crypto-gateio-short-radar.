@@ -126,6 +126,7 @@ export function normalizeContract(row) {
   const takerFeeRate = numeric(row.taker_fee_rate);
   return {
     name: row.name,
+    launchTime: numeric(row.launch_time) > 0 ? numeric(row.launch_time) : null,
     active: typeof row.status === "string" && row.status.toLowerCase() === "trading",
     fundingIntervalSeconds: interval !== null && interval > 0 ? interval : null,
     takerFeeRate: takerFeeRate !== null && takerFeeRate >= 0 && takerFeeRate < 1 ? takerFeeRate : null,
@@ -255,6 +256,8 @@ export function normalizeContractStats(rows, nowSeconds) {
       topLsrSize: field("top_lsr_size", true),
       topLongOpenInterest: optionalVisualField("top_long_size"),
       topShortOpenInterest: optionalVisualField("top_short_size"),
+      longTakerVolume: optionalVisualField("long_taker_size"),
+      shortTakerVolume: optionalVisualField("short_taker_size"),
       longLiquidationSize: field("long_liq_size", true),
       longLiquidationAmount: field("long_liq_amount", true),
       longLiquidationUsd: field("long_liq_usd", true),
