@@ -178,6 +178,15 @@ button:disabled { cursor: wait; opacity: .6; }
 .chart-layer-menu > summary { padding: 10px 12px; cursor: pointer; font-size: 13px; font-weight: 700; }
 .chart-layer-options { display: grid; gap: 6px; padding: 8px 12px 12px; }
 .chart-layer-options label { display: flex; align-items: center; gap: 9px; min-height: 34px; font-size: 12px; line-height: 1.4; }
+.chart-layer-options label:has(.layer-copy) { align-items: flex-start; padding: 6px 0; border-bottom: 1px solid #263448; }
+.layer-copy { display: grid; min-width: 0; gap: 3px; overflow-wrap: anywhere; }
+.layer-copy small { color: #a9bad0; font-size: 11px; }
+.layer-state { font-size: 11px; color: #a9bad0; }
+.layer-ready { color: #70edb9; }
+.layer-stale, .layer-loading { color: #ffd17c; }
+.layer-error, .layer-missing { color: #ffb0a4; }
+.gate-context-charts { margin-top: 10px; }
+.gate-context-charts .chart-summary strong { color: #8ccede; }
 .chart-layer-options input { flex: 0 0 auto; width: 17px; height: 17px; accent-color: #61A9BD; }
 .chart-layer-options select { min-width: 0; max-width: 100%; padding: 6px; color: #edf2fa; background: #141e2c; border: 1px solid #536276; border-radius: 5px; }
 .chart-layer-options p, .unavailable-indicators { color: #a9bad0; font-size: 11px; line-height: 1.45; }

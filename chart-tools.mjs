@@ -1,6 +1,6 @@
 export const DEFAULT_CHART_LAYERS = Object.freeze({
   ema: true, rci: true, obv: true, volume: true, oi: true, funding: true,
-  oiChange: false, topOi: true, whales: true, whaleMode: "levels"
+  oiChange: false, topOi: true, taker: true, liquidations: true, whales: true, whaleMode: "levels"
 });
 
 export function normalizeChartLayers(value) {
