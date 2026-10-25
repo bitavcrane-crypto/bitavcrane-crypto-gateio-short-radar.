@@ -7,6 +7,7 @@ import { buildGateContext, indicatorState } from "./gate-context.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createVisibleWallTracker } from "./wall-monitor.mjs";
+import { analyzeSqueezeEngine } from "./squeeze-engine.mjs";
 import { summarizeShort, rankShortCandidates, formatLevelPrice, readableTechnicalText, chartWindow, contextSeries } from "./radar-presentation.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition, valueAtClientY } from "./chart-crosshair.mjs";
 import { axisTicks, timeAxisTicks, formatChartValue, chartReadout, layoutAxisLabels, normalizeChartLayers, oiChangeRows } from "./chart-tools.mjs";
@@ -494,6 +495,127 @@ function renderStrategyPanel(model, cvdSnapshot, pair) {
     "</p><p><strong>Рівні:</strong> " + escapeHtml(levels) + " · " + escapeHtml(confirmation) +
     "</p><p class=\"strategy-time\">Книга заявок оновлена: " + escapeHtml(updateTime) +
     " · поріг R/R: 1 : " + formatNumber(strategy.minimumRiskReward, 2) + "</p></details></section>";
+}
+
+function renderSqueezeEnginePanel(engine) {
+  if (!engine) return "";
+  const labels = {
+    ANALYZED: "Оцінка доступна",
+    DATA_INSUFFICIENT: "ДАНИХ НЕДОСТАТНЬО",
+    CONFIRMED: "ПІДТВЕРДЖЕНО",
+    POSSIBLE: "МОЖЛИВИЙ КАНДИДАТ",
+    NO_CONFIRMED_SPIKE: "НЕ ПІДТВЕРДЖЕНО",
+    EARLY_SQUEEZE: "РАННІЙ СКВІЗ",
+    HIGH_SQUEEZE_RISK: "ВИСОКИЙ РИЗИК СКВІЗУ",
+    EXTREME: "ЕКСТРЕМАЛЬНИЙ РИЗИК",
+    NORMAL: "НОРМА",
+    WATCH: "СПОСТЕРЕЖЕННЯ",
+    CANDIDATE: "КАНДИДАТ ВИСНАЖЕННЯ",
+    NOT_CONFIRMED: "НЕ ПІДТВЕРДЖЕНО",
+    NO_TRADE: "НЕ ТОРГУВАТИ",
+    LIMITED: "ОБМЕЖЕНО",
+    MODERATE: "СЕРЕДНЯ",
+    HIGH: "ВИСОКА",
+    MOMENTUM: "ІМПУЛЬСНИЙ РУХ",
+    LEVERAGE_DRIVEN: "РУХ ІЗ НАКОПИЧЕННЯМ КРЕДИТНОГО ПЛЕЧА",
+    SHORT_COVERING: "ЗАКРИТТЯ SHORT / SHORT SQUEEZE",
+    LONG_SQUEEZE: "LONG SQUEEZE",
+    SHORT_SQUEEZE: "SHORT SQUEEZE"
+  };
+  const componentLabels = {
+    priceAcceleration: "Прискорення ціни",
+    volumeAnomaly: "Аномалія обсягу / RVOL",
+    atrExpansion: "Розширення ATR",
+    cvdImpulse: "Імпульс перевіреного CVD",
+    oiImpulse: "Імпульс відкритого інтересу",
+    liquidationImpulse: "Імпульс ліквідацій",
+    oiCrowding: "Накопичення OI",
+    fundingPressure: "Тиск funding",
+    priceExtension: "Розширення ціни",
+    flowDivergence: "Розбіжність потоку",
+    volatilityStress: "Волатильність"
+  };
+  const scoreRows = components => Object.entries(components).map(([key, value]) =>
+    '<div class="metric"><span>' + escapeHtml(componentLabels[key] || key) +
+    '</span><strong>' + value + "</strong></div>").join("");
+  const sourceRows = engine.metrics.map(metric =>
+    '<p class="squeeze-source"><strong>' + escapeHtml(metric.name) + " · " +
+      escapeHtml(metric.timeframe) + ":</strong> " + escapeHtml(metric.source) + " · " +
+      (metric.available ? "доступно" : "відсутнє / непідтверджене") + "</p>").join("");
+  const shortStatus = labels[engine.shortConfirmation.status] || engine.shortConfirmation.status;
+  const activeStatus = engine.squeeze.active ?
+    labels[engine.squeeze.direction] || engine.squeeze.direction :
+    engine.squeeze.activeStatus === "UNCONFIRMED" ?
+      "НЕ ПІДТВЕРДЖЕНО · напрямок ліквідацій недоступний" : "НЕ ПІДТВЕРДЖЕНО";
+  return '<section class="squeeze-engine" aria-label="Окремий аналіз spike та squeeze">' +
+    '<h3>Окремий аналіз SPIKE та SQUEEZE · Gate.io</h3>' +
+    '<p class="squeeze-engine-note">' + escapeHtml(labels[engine.status] || engine.status) +
+      " · покриття даних " + engine.dataCoverage.available + "/" + engine.dataCoverage.total +
+      " · довіра " + escapeHtml(labels[engine.confidence] || engine.confidence) +
+      " · не змінює базову short-strategy</p>" +
+    '<div class="squeeze-engine-grid"><div><strong>SPIKE</strong><span>' +
+      escapeHtml(labels[engine.spike.status] || engine.spike.status) + " · " +
+      engine.spike.score + "/100</span><small>Покриття " + engine.spike.dataCoverage.available +
+      "/" + engine.spike.dataCoverage.total + (engine.spike.type ?
+        " · " + escapeHtml(labels[engine.spike.type] || engine.spike.type) +
+        " · довіра " + escapeHtml(labels[engine.spike.typeConfidence] ||
+          engine.spike.typeConfidence) : "") + "</small></div>" +
+    '<div><strong>ТИСК СКВІЗУ</strong><span>' +
+      escapeHtml(labels[engine.squeeze.level] || engine.squeeze.level) + " · " +
+      engine.squeeze.pressure + "/100</span><small>Покриття " +
+      engine.squeeze.dataCoverage.available + "/" + engine.squeeze.dataCoverage.total +
+      " · оцінка ризику, не ймовірність. Ранній кандидат: " +
+      (engine.squeeze.earlyCandidate ? "так" : "не підтверджено") + "</small></div>" +
+    '<div><strong>СКВІЗ АКТИВНИЙ</strong><span>' + escapeHtml(activeStatus) +
+      "</span><small>Потрібні рух ціни, зміна OI та фактичний напрямок ліквідацій Gate.</small></div>" +
+    '<div><strong>ВИСНАЖЕННЯ SPIKE</strong><span>' +
+      escapeHtml(labels[engine.exhaustion.status] || engine.exhaustion.status) +
+      "</span><small>Кандидат: " + (engine.exhaustion.candidate ? "так" : "ні") +
+      " · підтверджено: " + (engine.exhaustion.confirmed ? "так" : "ні") + "</small></div>" +
+    '<div><strong>SHORT CONFIRMATION</strong><span>' + escapeHtml(shortStatus) +
+      "</span><small>" + escapeHtml(engine.shortConfirmation.reason) + "</small></div></div>" +
+    '<details><summary>Складові оцінок, наявність даних і таймфрейми</summary>' +
+      '<p><strong>SPIKE SCORE ' + engine.spike.score + "/100 · покриття " +
+        engine.spike.dataCoverage.available + "/" + engine.spike.dataCoverage.total +
+        "</strong></p><div class=\"metrics\">" + scoreRows(engine.spike.components) +
+      '</div><p><strong>SQUEEZE PRESSURE ' + engine.squeeze.pressure + "/100 · покриття " +
+        engine.squeeze.dataCoverage.available + "/" + engine.squeeze.dataCoverage.total +
+        "</strong></p><div class=\"metrics\">" + scoreRows(engine.squeeze.components) +
+      '</div><p><strong>Доступні метрики:</strong> ' +
+        escapeHtml(engine.availableMetrics.join(" · ") || "немає") +
+      '</p><p><strong>Відсутні або непідтверджені:</strong> ' +
+        escapeHtml(engine.missingMetrics.join(" · ") || "немає") +
+      '</p><p><strong>Таймфрейми:</strong> тригер ' + escapeHtml(engine.timeframes.trigger) +
+        " · сетап " + escapeHtml(engine.timeframes.setup || "недоступний") +
+        " · структура " + escapeHtml(engine.timeframes.structure || "недоступна") +
+        " · режим " + escapeHtml(engine.timeframes.regime || "недоступний") +
+      '</p><p>' + escapeHtml(engine.reason) +
+      '</p><p>Binance CVD не підміняє Gate flow. Наявні Gate taker-агрегати не вважаються підтвердженим CVD.</p>' +
+      sourceRows +
+    "</details></section>";
+}
+
+function analyzeMarketSqueeze(data) {
+  return analyzeSqueezeEngine({
+    frames: Object.fromEntries(["5m", "15m", "1h", "4h"].map(function (timeframe) {
+      return [timeframe, {
+        timeframe: timeframe,
+        candles: data.candles[timeframe],
+        quality: data.qualities[timeframe]
+      }];
+    })),
+    derivatives: data.stats,
+    funding: {
+      quality: data.ticker.quality === "OK" && Number.isFinite(data.fundingNormalized) ?
+        "OK" : "INCOMPLETE",
+      normalized8h: data.fundingNormalized
+    },
+    flow: {
+      quality: "UNAVAILABLE",
+      verified: false,
+      source: "Gate.io contract_stats · семантика агресорного потоку не підтверджена"
+    }
+  });
 }
 
 function currentTickerPrice(model) {
@@ -1394,6 +1516,7 @@ function renderCard(pair) {
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
     '</div></details>' + levels + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) +
+    renderSqueezeEnginePanel(model.analysisEngine) +
     '<details class="technical-details"><summary>Додаткові індикатори та повне пояснення</summary>' + renderConfirmation(model) +
     '<p class="why"><strong>Чому?</strong> ' + escapeHtml(readableTechnicalText(model.why)) + '</p></details>' +
     (qualityNotes.length ? '<p class="quality-note">' + escapeHtml(qualityNotes.join(" · ")) + "</p>" : "") +
@@ -1706,7 +1829,7 @@ function markPairUnavailable(pair, message) {
     scoreReasons: [],
     missingScoreData: ["останні дані застаріли"]
   }) : null;
-  models[pair] = Object.assign({}, models[pair], {
+  const unavailableModel = Object.assign({}, models[pair], {
     data: Object.assign({}, models[pair].data, {
       orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" }),
       visibleWalls: { status: "UNAVAILABLE", reason: "Книгу після помилки оновлення позначено застарілою." },
@@ -1737,6 +1860,8 @@ function markPairUnavailable(pair, message) {
       confirmationSettings, Math.floor(Date.now() / 1000)),
     why: "Оновлення не вдалося (" + message + "). Показані останні значення застаріли й не є підтвердженням для входу."
   });
+  unavailableModel.analysisEngine = analyzeMarketSqueeze(unavailableModel.data);
+  models[pair] = unavailableModel;
 }
 
 function updateConfirmationSettings(settings) {
@@ -1947,6 +2072,7 @@ async function scan() {
         model.data.visibleWalls = visibleWalls;
         model.data.oiVisualizationHistory = stats.rows;
         model.data.contractInfo = contractMap.get(pair) || null;
+        model.analysisEngine = analyzeMarketSqueeze(model.data);
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);
