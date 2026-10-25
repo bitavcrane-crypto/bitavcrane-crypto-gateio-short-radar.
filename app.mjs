@@ -538,6 +538,10 @@ function renderSqueezeEnginePanel(engine) {
   const scoreRows = components => Object.entries(components).map(([key, value]) =>
     '<div class="metric"><span>' + escapeHtml(componentLabels[key] || key) +
     '</span><strong>' + value + "</strong></div>").join("");
+  const sourceRows = engine.metrics.map(metric =>
+    '<p class="squeeze-source"><strong>' + escapeHtml(metric.name) + " · " +
+      escapeHtml(metric.timeframe) + ":</strong> " + escapeHtml(metric.source) + " · " +
+      (metric.available ? "доступно" : "відсутнє / непідтверджене") + "</p>").join("");
   const shortStatus = labels[engine.shortConfirmation.status] || engine.shortConfirmation.status;
   const activeStatus = engine.squeeze.active ?
     labels[engine.squeeze.direction] || engine.squeeze.direction :
@@ -558,7 +562,9 @@ function renderSqueezeEnginePanel(engine) {
           engine.spike.typeConfidence) : "") + "</small></div>" +
     '<div><strong>ТИСК СКВІЗУ</strong><span>' +
       escapeHtml(labels[engine.squeeze.level] || engine.squeeze.level) + " · " +
-      engine.squeeze.pressure + "/100</span><small>Оцінка ризику, не ймовірність. Ранній кандидат: " +
+      engine.squeeze.pressure + "/100</span><small>Покриття " +
+      engine.squeeze.dataCoverage.available + "/" + engine.squeeze.dataCoverage.total +
+      " · оцінка ризику, не ймовірність. Ранній кандидат: " +
       (engine.squeeze.earlyCandidate ? "так" : "не підтверджено") + "</small></div>" +
     '<div><strong>СКВІЗ АКТИВНИЙ</strong><span>' + escapeHtml(activeStatus) +
       "</span><small>Потрібні рух ціни, зміна OI та фактичний напрямок ліквідацій Gate.</small></div>" +
@@ -572,8 +578,9 @@ function renderSqueezeEnginePanel(engine) {
       '<p><strong>SPIKE SCORE ' + engine.spike.score + "/100 · покриття " +
         engine.spike.dataCoverage.available + "/" + engine.spike.dataCoverage.total +
         "</strong></p><div class=\"metrics\">" + scoreRows(engine.spike.components) +
-      '</div><p><strong>SQUEEZE PRESSURE ' + engine.squeeze.pressure +
-        "/100</strong></p><div class=\"metrics\">" + scoreRows(engine.squeeze.components) +
+      '</div><p><strong>SQUEEZE PRESSURE ' + engine.squeeze.pressure + "/100 · покриття " +
+        engine.squeeze.dataCoverage.available + "/" + engine.squeeze.dataCoverage.total +
+        "</strong></p><div class=\"metrics\">" + scoreRows(engine.squeeze.components) +
       '</div><p><strong>Доступні метрики:</strong> ' +
         escapeHtml(engine.availableMetrics.join(" · ") || "немає") +
       '</p><p><strong>Відсутні або непідтверджені:</strong> ' +
@@ -582,8 +589,33 @@ function renderSqueezeEnginePanel(engine) {
         " · сетап " + escapeHtml(engine.timeframes.setup || "недоступний") +
         " · структура " + escapeHtml(engine.timeframes.structure || "недоступна") +
         " · режим " + escapeHtml(engine.timeframes.regime || "недоступний") +
+      '</p><p>' + escapeHtml(engine.reason) +
       '</p><p>Binance CVD не підміняє Gate flow. Наявні Gate taker-агрегати не вважаються підтвердженим CVD.</p>' +
+      sourceRows +
     "</details></section>";
+}
+
+function analyzeMarketSqueeze(data) {
+  return analyzeSqueezeEngine({
+    frames: Object.fromEntries(["5m", "15m", "1h", "4h"].map(function (timeframe) {
+      return [timeframe, {
+        timeframe: timeframe,
+        candles: data.candles[timeframe],
+        quality: data.qualities[timeframe]
+      }];
+    })),
+    derivatives: data.stats,
+    funding: {
+      quality: data.ticker.quality === "OK" && Number.isFinite(data.fundingNormalized) ?
+        "OK" : "INCOMPLETE",
+      normalized8h: data.fundingNormalized
+    },
+    flow: {
+      quality: "UNAVAILABLE",
+      verified: false,
+      source: "Gate.io contract_stats · семантика агресорного потоку не підтверджена"
+    }
+  });
 }
 
 function currentTickerPrice(model) {
@@ -1797,7 +1829,7 @@ function markPairUnavailable(pair, message) {
     scoreReasons: [],
     missingScoreData: ["останні дані застаріли"]
   }) : null;
-  models[pair] = Object.assign({}, models[pair], {
+  const unavailableModel = Object.assign({}, models[pair], {
     data: Object.assign({}, models[pair].data, {
       orderBook: Object.assign({}, models[pair].data.orderBook, { quality: "STALE" }),
       visibleWalls: { status: "UNAVAILABLE", reason: "Книгу після помилки оновлення позначено застарілою." },
@@ -1828,6 +1860,8 @@ function markPairUnavailable(pair, message) {
       confirmationSettings, Math.floor(Date.now() / 1000)),
     why: "Оновлення не вдалося (" + message + "). Показані останні значення застаріли й не є підтвердженням для входу."
   });
+  unavailableModel.analysisEngine = analyzeMarketSqueeze(unavailableModel.data);
+  models[pair] = unavailableModel;
 }
 
 function updateConfirmationSettings(settings) {
@@ -2038,26 +2072,7 @@ async function scan() {
         model.data.visibleWalls = visibleWalls;
         model.data.oiVisualizationHistory = stats.rows;
         model.data.contractInfo = contractMap.get(pair) || null;
-        model.analysisEngine = analyzeSqueezeEngine({
-          frames: Object.fromEntries(["5m", "15m", "1h", "4h"].map(function (timeframe) {
-            return [timeframe, {
-              timeframe: timeframe,
-              candles: model.data.candles[timeframe],
-              quality: model.data.qualities[timeframe]
-            }];
-          })),
-          derivatives: stats,
-          funding: {
-            quality: ticker.quality === "OK" && Number.isFinite(model.data.fundingNormalized) ?
-              "OK" : "INCOMPLETE",
-            normalized8h: model.data.fundingNormalized
-          },
-          flow: {
-            quality: "UNAVAILABLE",
-            verified: false,
-            source: "Gate.io contract_stats · семантика агресорного потоку не підтверджена"
-          }
-        });
+        model.analysisEngine = analyzeMarketSqueeze(model.data);
         const prior = models[pair];
         const signal = transitionSignal(model, prior, prior ? prior.candleTime : null);
         if (prior) notifyChange(pair, prior.state.key, signal.state.key, signal);

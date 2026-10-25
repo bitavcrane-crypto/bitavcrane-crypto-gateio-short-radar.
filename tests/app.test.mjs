@@ -10,6 +10,7 @@ import { buildIndicatorVisualization } from "../indicator-visualization.mjs";
 import { chartWindow, contextSeries, formatLevelPrice } from "../radar-presentation.mjs";
 import { axisTicks, timeAxisTicks, formatChartValue, layoutAxisLabels, normalizeChartLayers, oiChangeRows } from "../chart-tools.mjs";
 import { buildGateContext, indicatorState } from "../gate-context.mjs";
+import { analyzeSqueezeEngine } from "../squeeze-engine.mjs";
 import { WHALE_COHORT } from "../hyperliquid-cohort.mjs";
 import { freshWhaleSnapshot, hyperliquidCoin, normalizeWhaleHistory, recordWhaleHistory, whaleHistorySeries } from "../hyperliquid.mjs";
 import {
@@ -315,6 +316,21 @@ test("CVD context stays informational and fails closed when the optional stream 
   assert.match(insufficient, /дивергенція: недостатньо даних/);
 });
 
+test("separate squeeze-engine UI reports Ukrainian data limits and does not imply a short trade", function () {
+  const render = runInNewContext(functionSource("renderSqueezeEnginePanel") +
+    "\nrenderSqueezeEnginePanel;", {
+    escapeHtml: function (value) {
+      return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+  });
+  const html = render(analyzeSqueezeEngine({}));
+  assert.match(html, /Окремий аналіз SPIKE та SQUEEZE · Gate\.io/);
+  assert.match(html, /ДАНИХ НЕДОСТАТНЬО/);
+  assert.match(html, /SHORT CONFIRMATION<\/strong><span>НЕ ТОРГУВАТИ/);
+  assert.match(html, /напрямок агресорної сторони не верифікований/);
+  assert.match(html, /не змінює базову short-strategy/);
+});
+
 test("pilot simulator is explicitly fictional and scenario controls update the unified explanation", function () {
   const html = readFileSync(new URL("../pilot.html", import.meta.url), "utf8");
   assert.match(html, /СИМУЛЯЦІЯ · НЕ LIVE-ДАНІ · НЕ BACKTEST/);
@@ -408,7 +424,10 @@ test("failed refresh revokes confirmed, readiness and alert eligibility", functi
   const markUnavailable = runInNewContext(functionSource("markPairUnavailable") + "\nmarkPairUnavailable;", {
     models: models, pairErrors: {}, confirmationSettings: {},
     visibleWallTracker: { remove: function (pair) { removed.push(pair); } },
-    evaluateShortConfirmation: function () { return { state: "unavailable" }; }
+    evaluateShortConfirmation: function () { return { state: "unavailable" }; },
+    analyzeMarketSqueeze: function () {
+      return { status: "DATA_INSUFFICIENT", spike: { candidate: false } };
+    }
   });
   markUnavailable("Q_USDT", "HTTP 429");
   assert.equal(models.Q_USDT.confirmed, false);
@@ -565,12 +584,14 @@ test("partial API failures preserve other timeframes and missing contracts never
     fetchOrderBook: async function () { throw new Error("HTTP 503"); },
     mapLimited: async function (items, _, worker) { await Promise.all(items.map(worker)); },
     normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker, buildMarketData, transitionSignal,
+    analyzeSqueezeEngine,
     evaluateShortConfirmation: function () { return {}; },
     markPairUnavailable: function (pair, reason) { errors[pair] = reason; },
     notifyChange: function () { assert.fail("First unavailable scan must not announce a signal"); },
     render: function () {}, refreshOpenVisualizations: function () {}, lastSuccessLabel: function () { return ""; }
   };
-  const scan = runInNewContext(source.slice(start, end) + "\nscan;", globals);
+  const scan = runInNewContext(functionSource("analyzeMarketSqueeze") + "\n" +
+    source.slice(start, end) + "\nscan;", globals);
   await scan();
   assert.equal(models.Q_USDT.data.qualities["15m"], "OK");
   assert.equal(models.Q_USDT.data.qualities["1h"], "OK");
@@ -857,13 +878,15 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
         },
         mapLimited: async function (items, _, worker) { await Promise.all(items.map(worker)); },
         normalizeContract, normalizeContractStats, normalizeOrderBook, normalizeTicker, buildMarketData, transitionSignal,
+        analyzeSqueezeEngine,
         evaluateShortConfirmation: function () { return {}; },
         notifyChange: function () {}, render: function () {}, refreshOpenVisualizations: function () {},
         lastSuccessLabel: function () { return ""; }, ...overrides
       };
       const start = source.indexOf("async function scan(");
       const end = source.indexOf('\ndocument.getElementById("pair-form")', start);
-      const scan = runInNewContext(functionSource("markPairUnavailable") + "\n" +
+      const scan = runInNewContext(functionSource("analyzeMarketSqueeze") + "\n" +
+        functionSource("markPairUnavailable") + "\n" +
         source.slice(start, end) + "\nscan;", globals);
       return { globals, scan };
     }
@@ -928,6 +951,8 @@ test("saved pairs are sanitized without deleting pairs absent from a partial con
       await harness.scan();
       assert.equal(harness.globals.models.Q_USDT.data.stats.quality, "STALE");
       assert.equal(harness.globals.models.Q_USDT.data.oiVisualizationHistory[0].topLongOpenInterest, 600);
+      assert.equal(harness.globals.models.Q_USDT.analysisEngine.status, "DATA_INSUFFICIENT");
+      assert.equal(harness.globals.models.Q_USDT.analysisEngine.spike.candidate, false);
       harness.globals.fetchTickers = goodTickers;
       await harness.scan();
       assert.equal(harness.globals.models.Q_USDT.data.stats.quality, "OK");

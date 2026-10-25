@@ -79,20 +79,20 @@ function makeInput({
     fifteen[fifteen.length - 4] = {
       ...fifteen.at(-4),
       open: pivot,
-      close: pivot * 0.99,
+      close: pivot * 0.98,
       high: pivot * 1.002,
-      low: pivot * 0.985
+      low: pivot * 0.975
     };
     fifteen[fifteen.length - 3] = {
       ...fifteen.at(-3),
-      open: pivot * 0.99,
-      close: pivot * 0.992,
+      open: pivot * 0.98,
+      close: pivot * 0.982,
       high: pivot * 1.003,
-      low: pivot * 0.988
+      low: pivot * 0.979
     };
     fifteen[fifteen.length - 2] = {
       ...fifteen.at(-2),
-      open: pivot * 0.992,
+      open: pivot * 0.982,
       close: pivot * 0.985,
       high: pivot * 0.994,
       low: pivot * 0.98
@@ -100,16 +100,16 @@ function makeInput({
     fifteen[fifteen.length - 1] = {
       ...fifteen.at(-1),
       open: pivot * 0.985,
-      close: pivot * 0.98,
-      high: pivot * 1.01,
+      close: pivot * 0.9845,
+      high: structureBreak ? pivot * 1.01 : pivot * 0.986,
       low: pivot * 0.975
     };
   }
 
   const statsRows = Array.from({ length: 20 }, (_, index) => {
     const time = start + index * STEP;
-    const openInterest = oiDirection === 1 ?
-      (index >= 8 ? 102 : 100) : (index >= 8 ? 98 : 100);
+    const openInterest = index === 19 ? (oiDirection === 1 ? 104 : 96) :
+      oiDirection === 1 ? (index >= 8 ? 102 : 100) : (index >= 8 ? 98 : 100);
     return {
       time,
       openInterest: missingOi ? null : openInterest,
@@ -267,15 +267,23 @@ test("exhaustion, failed structural retest, and bearish verified flow can confir
     spike: true,
     exhaustion: true,
     structureBreak: true,
-    early: true,
     oiDirection: 1,
     fundingRate: 0.0006,
     verifiedFlow: true,
     flowDeltas: [8, 7, 6, -2, -3, -4]
   }));
-  assert.equal(result.exhaustion.confirmed, true);
+  assert.equal(result.exhaustion.confirmed, true, JSON.stringify({
+    squeeze: result.squeeze,
+    exhaustion: result.exhaustion,
+    short: result.shortConfirmation
+  }));
   assert.equal(result.shortConfirmation.evidence.bearishStructureBreakAndFailedRetest, true);
-  assert.equal(result.shortConfirmation.status, "CONFIRMED");
+  assert.equal(result.shortConfirmation.status, "CONFIRMED", JSON.stringify({
+    early: result.squeeze.earlyCandidate,
+    pressure: result.squeeze.pressure,
+    exhaustion: result.exhaustion,
+    evidence: result.shortConfirmation.evidence
+  }));
 });
 
 test("insufficient price or volume history reports DATA_INSUFFICIENT", () => {

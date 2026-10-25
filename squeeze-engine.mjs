@@ -187,7 +187,6 @@ export function analyzeSqueezeEngine(input = {}) {
   const oi5m = exactOiChange(rows, 300);
   const oi15m = exactOiChange(rows, 900);
   const oi1h = exactOiChange(rows, 3600);
-  const oiLatest = rows?.at(-1)?.openInterest;
   const funding = input.funding?.quality === "OK" && finite(input.funding.normalized8h) ?
     input.funding.normalized8h : null;
   const currentPrice = candles5?.at(-1)?.close;
@@ -247,17 +246,26 @@ export function analyzeSqueezeEngine(input = {}) {
   const extension = change(candles15?.at(-1)?.close, candles15?.at(-21)?.close);
   const priceExtended = finite(extension) && extension >= 3 &&
     finite(recentHigh) && candles15.at(-1).close >= recentHigh * 0.95;
+  const structuralFailure = structureBreakAndFailedRetest(candles15);
   const recent15Move = change(candles15?.at(-1)?.close, candles15?.at(-4)?.close);
   const prior15Move = change(candles15?.at(-4)?.close, candles15?.at(-7)?.close);
   const momentumWeakening = (finite(priceImpulse) && finite(priorImpulse) &&
     priceImpulse < priorImpulse && priceImpulse > -0.25) ||
     (finite(prior15Move) && prior15Move > 0 && finite(recent15Move) &&
-      recent15Move < prior15Move * 0.75);
+      recent15Move < prior15Move * 0.75) || structuralFailure;
   const obvDiverges = obvDivergence(candles15);
   const noPriceProgress = volumeRatio !== null && volumeRatio >= 1.5 &&
     finite(priceImpulse) && Math.abs(priceImpulse) < 0.5;
   const flowDiverges = obvDiverges === true || (flow !== null && flow.recent < 0) ||
     noPriceProgress;
+  const pressureAvailable = [
+    oi1h !== null,
+    funding !== null,
+    finite(extension) && finite(recentHigh),
+    obvDiverges !== null || flow !== null || (volumeRatio !== null && finite(priceImpulse)),
+    volumeRatio !== null,
+    atrRatio !== null
+  ];
   const oiCrowded = oi1h !== null && oi1h >= 1;
   const pressureComponents = {
     oiCrowding: oiCrowded ? PRESSURE_WEIGHTS.oiCrowding : 0,
@@ -297,7 +305,6 @@ export function analyzeSqueezeEngine(input = {}) {
   const exhaustionConfirmed = exhaustionCandidate && rejection &&
     failedContinuation && flowDeterioration;
 
-  const structuralFailure = structureBreakAndFailedRetest(candles15);
   const bearishFlow = flow !== null && flow.recent < 0;
   const shortEligibleStage = earlyCandidate && pressureScore >= 50;
   const shortConfirmation = shortEligibleStage && exhaustionConfirmed &&
@@ -310,7 +317,8 @@ export function analyzeSqueezeEngine(input = {}) {
     sourceMetric(input, "обсяг / RVOL", volumeRatio, "Gate.io Futures candlesticks", "5m"),
     sourceMetric(input, "розширення ATR", atrRatio, "Gate.io Futures candlesticks", "5m"),
     sourceMetric(input, "CVD з підтвердженою семантикою", flow?.recent ?? null,
-      flow ? input.flow.source : "Gate contract_stats: taker-side semantics unverified", "5m"),
+      flow ? input.flow.source :
+        "Gate.io contract_stats · напрямок агресорної сторони не верифікований", "5m"),
     sourceMetric(input, "зміна відкритого інтересу", oi5m, "Gate.io contract_stats", "5m"),
     sourceMetric(input, "напрямок ліквідацій", liquidation.long !== null && liquidation.short !== null ?
       { long: liquidation.long, short: liquidation.short } : null, "Gate.io contract_stats", "5m"),
@@ -357,6 +365,7 @@ export function analyzeSqueezeEngine(input = {}) {
     squeeze: {
       pressure: pressureScore,
       maximum: 100,
+      dataCoverage: { available: pressureAvailable.filter(Boolean).length, total: pressureAvailable.length },
       components: pressureComponents,
       level: pressureLevel,
       earlyCandidate,
