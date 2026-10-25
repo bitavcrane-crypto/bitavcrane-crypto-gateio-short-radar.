@@ -178,7 +178,7 @@ function levelForPressure(score, earlyCandidate) {
 
 export function analyzeSqueezeEngine(input = {}) {
   const candles5 = frame(input, "5m", 22);
-  const candles15 = frame(input, "15m", 20);
+  const candles15 = frame(input, "15m", 21);
   const candles1h = frame(input, "1h");
   const candles4h = frame(input, "4h");
   const rows = statsRows(input);
@@ -244,12 +244,15 @@ export function analyzeSqueezeEngine(input = {}) {
   }
 
   const recentHigh = candles15 ? Math.max(...candles15.slice(-20).map(candle => candle.high)) : null;
-  const oneHourAgo = candles15?.at(-5)?.close;
-  const extension = change(candles15?.at(-1)?.close, oneHourAgo);
+  const extension = change(candles15?.at(-1)?.close, candles15?.at(-21)?.close);
   const priceExtended = finite(extension) && extension >= 3 &&
-    finite(recentHigh) && candles15.at(-1).close >= recentHigh * 0.99;
-  const momentumWeakening = finite(priceImpulse) && finite(priorImpulse) &&
-    priceImpulse < priorImpulse && priceImpulse > -0.25;
+    finite(recentHigh) && candles15.at(-1).close >= recentHigh * 0.95;
+  const recent15Move = change(candles15?.at(-1)?.close, candles15?.at(-4)?.close);
+  const prior15Move = change(candles15?.at(-4)?.close, candles15?.at(-7)?.close);
+  const momentumWeakening = (finite(priceImpulse) && finite(priorImpulse) &&
+    priceImpulse < priorImpulse && priceImpulse > -0.25) ||
+    (finite(prior15Move) && prior15Move > 0 && finite(recent15Move) &&
+      recent15Move < prior15Move * 0.75);
   const obvDiverges = obvDivergence(candles15);
   const noPriceProgress = volumeRatio !== null && volumeRatio >= 1.5 &&
     finite(priceImpulse) && Math.abs(priceImpulse) < 0.5;
@@ -281,7 +284,8 @@ export function analyzeSqueezeEngine(input = {}) {
 
   const latest15 = candles15?.at(-1);
   const rvolExtreme = volumeRatio !== null && volumeRatio >= 3;
-  const progressSmall = finite(priceImpulse) && Math.abs(priceImpulse) < 0.2;
+  const latest15Progress = change(latest15?.close, candles15?.at(-2)?.close);
+  const progressSmall = finite(latest15Progress) && Math.abs(latest15Progress) < 0.2;
   const extremeExtension = finite(extension) && extension >= 5;
   const exhaustionCandidate = spikeConfirmed && extremeExtension && rvolExtreme &&
     progressSmall && flowDiverges;
