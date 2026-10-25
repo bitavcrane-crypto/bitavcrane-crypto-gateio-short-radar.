@@ -48,13 +48,17 @@ button:disabled { cursor: wait; opacity: .6; }
 .list-explanation { color: #9eafc4; font-size: 12px; line-height: 1.6; }
 .list-explanation strong { color: #c8d9eb; }
 .token-row { min-width: 0; border: 1px solid #29384a; border-radius: 12px; background: #111a27; }
-.token-row > summary { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(75px, .65fr) minmax(160px, 2fr) 95px; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; list-style: none; }
+.token-row > summary { display: grid; grid-template-columns: minmax(115px, 1fr) minmax(75px, .65fr) minmax(160px, 2fr) 95px minmax(190px, 1.5fr); align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; list-style: none; }
 .token-row > summary::-webkit-details-marker { display: none; }
 .token-name { color: #edf2fa; font-weight: 800; font-size: 14px; }
 .token-name::before { content: "▸ "; color: #83a6c5; }
 .token-row[open] > summary .token-name::before { content: "▾ "; }
 .token-price, .token-score { color: #9eafc4; font-size: 12px; font-variant-numeric: tabular-nums; }
 .token-score { text-align: right; }
+.token-engine-scores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; min-width: 0; }
+.token-engine-score { display: grid; gap: 2px; min-width: 0; padding: 6px; border-radius: 6px; background: #0c1520; font-size: 10px; font-variant-numeric: tabular-nums; }
+.token-engine-score strong { color: #c8d9eb; }
+.token-engine-score small { color: #9eafc4; line-height: 1.35; }
 .token-verdict { font-size: 12px; }
 .conclusion-ready .token-verdict, .conclusion-ready > strong { color: #70edb9; }
 .conclusion-watch .token-verdict, .conclusion-watch > strong { color: #ffd17c; }
@@ -74,6 +78,7 @@ button:disabled { cursor: wait; opacity: .6; }
   .token-row > summary { grid-template-columns: 1fr auto; gap: 7px; padding: 12px; }
   .token-verdict { grid-column: 1; }
   .token-score { grid-column: 2; }
+  .token-engine-scores { grid-column: 1 / -1; }
 }
 .card { min-width: 0; padding: 17px; border: 1px solid #253348; border-radius: 15px; background: linear-gradient(145deg, #141e2c, #101722 75%); box-shadow: 0 12px 30px #0002; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
