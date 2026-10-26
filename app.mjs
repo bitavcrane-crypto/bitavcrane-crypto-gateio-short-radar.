@@ -1526,12 +1526,39 @@ function renderCard(pair) {
 function renderTokenRow(pair) {
   const model = models[pair];
   const conclusion = summarizeShort(model);
+  const engine = model?.analysisEngine;
+  const spike = engine?.spike;
+  const squeeze = engine?.squeeze;
+  const spikeStatuses = {
+    CONFIRMED: "ПІДТВЕРДЖЕНО",
+    POSSIBLE: "МОЖЛИВИЙ SPIKE",
+    NO_CONFIRMED_SPIKE: "НЕ ПІДТВЕРДЖЕНО",
+    DATA_INSUFFICIENT: "ДАНИХ НЕДОСТАТНЬО"
+  };
+  const squeezeLevels = {
+    NORMAL: "НОРМА",
+    WATCH: "СПОСТЕРЕЖЕННЯ",
+    EARLY_SQUEEZE: "РАННІЙ СКВІЗ",
+    HIGH_SQUEEZE_RISK: "ВИСОКИЙ РИЗИК",
+    EXTREME: "ЕКСТРЕМАЛЬНИЙ РИЗИК"
+  };
+  const scoreText = (value, maximum) => Number.isFinite(value) && Number.isFinite(maximum) ?
+    value + "/" + maximum : "—";
+  const coverageText = coverage => Number.isFinite(coverage?.available) &&
+    Number.isFinite(coverage?.total) ? coverage.available + "/" + coverage.total : "—";
   return '<details class="token-row conclusion-' + conclusion.tone + '" data-token="' + escapeHtml(pair) +
     '"' + (openTokens.has(pair) ? " open" : "") + '><summary><span class="token-name">' +
     escapeHtml(pair) + '</span><span class="token-price">' + formatLevelPrice(model?.data?.ticker?.last) +
     '</span><strong class="token-verdict">' + escapeHtml(conclusion.title) +
     '</strong><span class="token-score">SHORT ' + (Number.isFinite(model?.shortScore) ? model.shortScore : "—") +
-    '/100</span></summary><div class="token-body">' + renderCard(pair) + "</div></details>";
+    '/100</span><span class="token-engine-scores" aria-label="Оцінки SPIKE та SQUEEZE">' +
+    '<span class="token-engine-score"><strong>SPIKE ' + scoreText(spike?.score, spike?.maximum) +
+    '</strong><small>' + escapeHtml(spikeStatuses[spike?.status] || "СТАН НЕДОСТУПНИЙ") +
+    " · дані " + coverageText(spike?.dataCoverage) + "</small></span>" +
+    '<span class="token-engine-score"><strong>SQUEEZE ' + scoreText(squeeze?.pressure, squeeze?.maximum) +
+    '</strong><small>' + escapeHtml(squeezeLevels[squeeze?.level] || "СТАН НЕДОСТУПНИЙ") +
+    " · дані " + coverageText(squeeze?.dataCoverage) + "</small></span>" +
+    '</span></summary><div class="token-body">' + renderCard(pair) + "</div></details>";
 }
 
 function render() {

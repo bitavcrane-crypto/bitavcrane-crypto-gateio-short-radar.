@@ -112,6 +112,29 @@ function functionSource(name) {
   return source.slice(start, offset < 0 ? source.length : start + 1 + offset);
 }
 
+test("collapsed candidate rows show spike and squeeze scores, states, and data coverage", () => {
+  const renderTokenRow = runInNewContext(functionSource("renderTokenRow") + "\nrenderTokenRow;", {
+    models: { BTC_USDT: {
+      shortScore: 61,
+      data: { ticker: { last: 100 } },
+      analysisEngine: {
+        spike: { score: 75, maximum: 100, status: "CONFIRMED", dataCoverage: { available: 5, total: 6 } },
+        squeeze: { pressure: 80, maximum: 100, level: "HIGH_SQUEEZE_RISK", dataCoverage: { available: 4, total: 6 } }
+      }
+    } },
+    openTokens: new Set(),
+    summarizeShort: () => ({ tone: "watch", title: "СПОСТЕРІГАТИ" }),
+    escapeHtml: String,
+    formatLevelPrice: String,
+    renderCard: () => ""
+  });
+  const html = renderTokenRow("BTC_USDT");
+  assert.match(html, /SPIKE 75\/100/);
+  assert.match(html, /ПІДТВЕРДЖЕНО · дані 5\/6/);
+  assert.match(html, /SQUEEZE 80\/100/);
+  assert.match(html, /ВИСОКИЙ РИЗИК · дані 4\/6/);
+});
+
 function whaleHarness(overrides = {}) {
   const now = 1792582000000;
   const value = { cohortId: WHALE_COHORT.id, time: now / 1000, oldestTime: now, observedAt: now,
