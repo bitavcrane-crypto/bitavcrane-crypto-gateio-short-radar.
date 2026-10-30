@@ -163,7 +163,7 @@ test("one read-only public socket multiplexes validated symbols and ingests inde
   assert.equal(fetches, 1);
   assert.equal(FakeWebSocket.instances.length, 1);
   const socket = FakeWebSocket.instances[0];
-  assert.equal(socket.url, "wss://fstream.binance.com/public/stream");
+  assert.equal(socket.url, "wss://fstream.binance.com/market/stream");
   socket.open();
   assert.deepEqual(socket.sent[0], {
     method: "SUBSCRIBE", params: ["btcusdt@aggTrade", "ethusdt@aggTrade"], id: 1

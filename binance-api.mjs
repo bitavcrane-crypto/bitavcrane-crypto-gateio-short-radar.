@@ -1,5 +1,5 @@
 const API_ROOT = "https://fapi.binance.com/fapi/v1";
-const WS_URL = "wss://fstream.binance.com/public/stream";
+const WS_URL = "wss://fstream.binance.com/market/stream";
 const EXCHANGE_INFO_CACHE_MS = 5 * 60 * 1000;
 
 let exchangeInfoCache = null;
