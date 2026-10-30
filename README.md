@@ -187,7 +187,7 @@ REST-історія не домішується до WebSocket-сесії. Пр�
   однакові ціни та taking side агрегуються приблизно за 100 мс, а RPI не має окремого тегу.
 - [Binance USDⓈ-M REST Market Data](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data):
   `/fapi/v1/exchangeInfo` публікує symbol, status, contractType, quoteAsset і marginAsset;
-  WebSocket під’єднується до `/public/stream` і підписується на `symbol@aggTrade`.
+  WebSocket під’єднується до `/market/stream` і підписується на `symbol@aggTrade`.
 - [Офіційний WS SDK: поля `FuturesTrade`](https://github.com/gate/gatews/blob/12a935d30cdadad13696d70968e254b53437a2f6/go/response_future.go#L35-L48):
   `id`, `create_time`, `create_time_ms`, `contract`, `size`, `price`; поле `taker_side` у цій схемі не визначене.
 - [Офіційний REST SDK: `FuturesTrade`](https://github.com/gate/gateapi-python/blob/759c91c06face05c0610b4a62661f7e23172d9cb/docs/FuturesTrade.md):
