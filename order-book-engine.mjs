@@ -135,9 +135,17 @@ export function evaluateBookStability(snapshots, now = Date.now()) {
     longStrength !== null && longStrength >= (window15.start.bidUsd / window15.start.askUsd) * 0.9;
   const shortStable = window15.ready && window15.start.bidUsd > 0 && window15.start.askUsd > 0 &&
     shortStrength !== null && shortStrength >= (window15.start.askUsd / window15.start.bidUsd) * 0.9;
+  const longStrength30 = window30.ready && window30.end.askUsd > 0 ?
+    window30.end.bidUsd / window30.end.askUsd : null;
+  const shortStrength30 = window30.ready && window30.end.bidUsd > 0 ?
+    window30.end.askUsd / window30.end.bidUsd : null;
+  const longStable30 = window30.ready && window30.start.bidUsd > 0 && window30.start.askUsd > 0 &&
+    longStrength30 !== null && longStrength30 >= (window30.start.bidUsd / window30.start.askUsd) * 0.9;
+  const shortStable30 = window30.ready && window30.start.bidUsd > 0 && window30.start.askUsd > 0 &&
+    shortStrength30 !== null && shortStrength30 >= (window30.start.askUsd / window30.start.bidUsd) * 0.9;
   return {
     window15, window30, longStrength, shortStrength,
-    longStable, shortStable,
+    longStable, shortStable, longStrength30, shortStrength30, longStable30, shortStable30,
     longReady: Boolean(window15.ready && longStrength >= 1.5 && longStable),
     shortReady: Boolean(window15.ready && shortStrength >= 1.5 && shortStable)
   };
