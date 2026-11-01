@@ -1,0 +1,39 @@
+name: Order Book Tests
+
+on:
+  push:
+    branches:
+      - "copilot/background-orderbook-history"
+    paths:
+      - "order-book-engine.mjs"
+      - "tests/order-book-engine.test.mjs"
+      - "app.mjs"
+      - "scripts/collect-order-book-history.mjs"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "order-book-engine.mjs"
+      - "tests/order-book-engine.test.mjs"
+      - "app.mjs"
+      - "scripts/collect-order-book-history.mjs"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          node --check app.mjs
+          node --check order-book-engine.mjs
+          node --check scripts/collect-order-book-history.mjs
+      - name: Test order-book engine
+        run: node --test tests/order-book-engine.test.mjs

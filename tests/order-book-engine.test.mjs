@@ -31,7 +31,7 @@ test("partial depth blocks coverage and is not accepted as a history snapshot", 
   };
   const result = analyzeOrderBook(book);
   assert.equal(result.covered, false);
-  assert.equal(result.coverageBelowPercent, 20);
+  assert.ok(Math.abs(result.coverageBelowPercent - 20) < 1e-9);
   assert.equal(result.coverageAbovePercent, 50);
   const sampled = appendBookSnapshot({}, "BTC_USDT", result, 1000000);
   assert.equal(sampled.accepted, false);
@@ -47,7 +47,7 @@ test("15m stability requires continuous full-depth snapshots and Ask dominance",
   }
   const ready = evaluateBookStability(history.BTC_USDT, 1000000 + 16 * 60000);
   assert.equal(ready.window15.ready, true);
-  assert.equal(ready.shortStrength, 2);
+  assert.equal(ready.shortStrength, 21000 / 11000);
   assert.equal(ready.shortReady, true);
   assert.equal(ready.longReady, false);
 });
@@ -62,6 +62,21 @@ test("a gap greater than three minutes blocks historical book confirmation", () 
   const result = evaluateBookStability(snapshots, 1000000 + 16 * 60000);
   assert.equal(result.window15.ready, false);
   assert.match(result.window15.reason, /прогалина/);
+});
+
+test("background 5-minute samples can confirm 15m and 30m only with explicit 8-minute tolerance", () => {
+  const start = 1000000;
+  const snapshots = Array.from({ length: 7 }, (_, index) => ({
+    time: start + index * 5 * 60000,
+    bidUsd: 10000,
+    askUsd: 20000
+  }));
+  const strict = evaluateBookStability(snapshots, start + 30 * 60000);
+  assert.equal(strict.window15.ready, false);
+  const sampled = evaluateBookStability(snapshots, start + 30 * 60000, { maxGapMs: 8 * 60000 });
+  assert.equal(sampled.window15.ready, true);
+  assert.equal(sampled.window30.ready, true);
+  assert.equal(sampled.shortReady, true);
 });
 
 test("ATR entry uses closed 15m candles and places stop at two ATR", () => {

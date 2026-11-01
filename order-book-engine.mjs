@@ -101,7 +101,7 @@ export function appendBookSnapshot(history, contract, analysis, now = Date.now()
   return { history: next, snapshots: next[contract], accepted: true };
 }
 
-function continuousWindow(snapshots, minutes, now) {
+function continuousWindow(snapshots, minutes, now, maxGapMs) {
   const duration = minutes * 60000;
   if (!Array.isArray(snapshots) || snapshots.length < 2) {
     return { ready: false, reason: "Ще немає достатньо реальних знімків." };
@@ -110,24 +110,26 @@ function continuousWindow(snapshots, minutes, now) {
   const startTarget = end.time - duration;
   const eligibleStarts = snapshots.filter(item => item.time <= startTarget);
   const start = eligibleStarts.length ? eligibleStarts[eligibleStarts.length - 1] : null;
-  if (!start || startTarget - start.time > MAX_GAP_MS) {
+  if (!start || startTarget - start.time > maxGapMs) {
     return { ready: false, reason: "Період спостереження ще не завершився." };
   }
   const window = snapshots.filter(item => item.time >= start.time && item.time <= end.time);
   for (let index = 1; index < window.length; index += 1) {
-    if (window[index].time - window[index - 1].time > MAX_GAP_MS) {
-      return { ready: false, reason: "У спостереженнях є прогалина понад 3 хв." };
+    if (window[index].time - window[index - 1].time > maxGapMs) {
+      return { ready: false, reason: "У спостереженнях є прогалина понад " + Math.round(maxGapMs / 60000) + " хв." };
     }
   }
-  if (now - end.time > MAX_GAP_MS) {
-    return { ready: false, reason: "Останній знімок старший за 3 хв." };
+  if (now - end.time > maxGapMs) {
+    return { ready: false, reason: "Останній знімок старший за " + Math.round(maxGapMs / 60000) + " хв." };
   }
   return { ready: true, start, end, samples: window.length };
 }
 
-export function evaluateBookStability(snapshots, now = Date.now()) {
-  const window15 = continuousWindow(snapshots, 15, now);
-  const window30 = continuousWindow(snapshots, 30, now);
+export function evaluateBookStability(snapshots, now = Date.now(), options = {}) {
+  const requestedGap = options && Number.isFinite(options.maxGapMs) ? options.maxGapMs : MAX_GAP_MS;
+  const maxGapMs = Math.max(MAX_GAP_MS, Math.min(10 * 60 * 1000, requestedGap));
+  const window15 = continuousWindow(snapshots, 15, now, maxGapMs);
+  const window30 = continuousWindow(snapshots, 30, now, maxGapMs);
   const current = Array.isArray(snapshots) && snapshots.length ? snapshots[snapshots.length - 1] : null;
   const longStrength = current && current.askUsd > 0 ? current.bidUsd / current.askUsd : null;
   const shortStrength = current && current.bidUsd > 0 ? current.askUsd / current.bidUsd : null;

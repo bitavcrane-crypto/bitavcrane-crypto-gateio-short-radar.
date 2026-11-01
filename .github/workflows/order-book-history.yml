@@ -1,0 +1,46 @@
+name: Order Book History
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: order-book-history
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout collector
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Load previous history
+        run: |
+          git fetch origin order-book-history:refs/remotes/origin/order-book-history
+          git show origin/order-book-history:data/order-book-history.json > data/order-book-history.json
+      - name: Collect Gate.io futures order books
+        run: node scripts/collect-order-book-history.mjs
+      - name: Publish history to its data branch
+        run: |
+          cp data/order-book-history.json /tmp/order-book-history.json
+          git checkout -- data/order-book-history.json
+          git checkout -B order-book-history origin/order-book-history
+          mkdir -p data
+          cp /tmp/order-book-history.json data/order-book-history.json
+          if git diff --quiet -- data/order-book-history.json; then
+            echo "No new valid order-book snapshots."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/order-book-history.json
+          git commit -m "chore: update Gate.io order-book history"
+          git push origin order-book-history
