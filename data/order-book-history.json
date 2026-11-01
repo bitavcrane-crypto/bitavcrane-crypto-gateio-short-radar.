@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": null,
+  "samplingIntervalMs": 300000,
+  "maxGapMs": 480000,
+  "selection": "Top 30 active Gate.io USDT perpetual contracts by 24h quote volume",
+  "acceptedSnapshots": 0,
+  "contracts": {}
+}
