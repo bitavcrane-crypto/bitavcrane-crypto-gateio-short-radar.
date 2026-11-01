@@ -116,11 +116,11 @@ function continuousWindow(snapshots, minutes, now, maxGapMs) {
   const window = snapshots.filter(item => item.time >= start.time && item.time <= end.time);
   for (let index = 1; index < window.length; index += 1) {
     if (window[index].time - window[index - 1].time > maxGapMs) {
-      return { ready: false, reason: "У спостереженнях є прогалина понад 3 хв." };
+      return { ready: false, reason: "У спостереженнях є прогалина понад " + Math.round(maxGapMs / 60000) + " хв." };
     }
   }
   if (now - end.time > maxGapMs) {
-    return { ready: false, reason: "Останній знімок старший за 3 хв." };
+    return { ready: false, reason: "Останній знімок старший за " + Math.round(maxGapMs / 60000) + " хв." };
   }
   return { ready: true, start, end, samples: window.length };
 }
