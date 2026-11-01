@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
       - name: Load previous history
         run: |
-          git fetch origin order-book-history
+          git fetch origin order-book-history:refs/remotes/origin/order-book-history
           git show origin/order-book-history:data/order-book-history.json > data/order-book-history.json
       - name: Collect Gate.io futures order books
         run: node scripts/collect-order-book-history.mjs
