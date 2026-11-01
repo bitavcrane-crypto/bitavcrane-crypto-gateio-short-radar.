@@ -7,6 +7,7 @@ import { buildGateContext, indicatorState } from "./gate-context.mjs";
 import { createCvdAnalysis } from "./cvd-ui.mjs";
 import { gateContractToBinanceSymbol } from "./binance-api.mjs";
 import { createVisibleWallTracker } from "./wall-monitor.mjs";
+import { analyzeOrderBook, appendBookSnapshot, evaluateBookStability, calculateAtrEntry } from "./order-book-engine.mjs";
 import { analyzeSqueezeEngine } from "./squeeze-engine.mjs";
 import { summarizeShort, rankShortCandidates, formatLevelPrice, readableTechnicalText, chartWindow, contextSeries } from "./radar-presentation.mjs";
 import { createCrosshairController, formatCrosshairTime, positionAtClientX, valueAtPosition, valueAtClientY } from "./chart-crosshair.mjs";
@@ -31,6 +32,7 @@ const VISUALIZATION_STATE_KEY = "gate-short-radar-visualization-state";
 const OPEN_INTEREST_STATE_KEY = "gate-short-radar-oi-visualization-state";
 const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const EVENTS_KEY = "gate-short-radar-signal-events-v1";
+const ORDER_BOOK_HISTORY_KEY = "gate-order-book-history-v1";
 const CHART_LAYERS_KEY = "gate-short-radar-chart-layers-v1";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24], upper: 95, lower: 5 }, ema: { periods: [200, 55, 22] }
@@ -58,6 +60,7 @@ let pairs = manualPairs.slice();
 let models = {};
 let pairErrors = {};
 let events = loadSignalEvents();
+let orderBookHistory = loadOrderBookHistory();
 let openVisualizations = new Set();
 let openTokens = new Set();
 let chartWindows = {};
@@ -1413,6 +1416,58 @@ function fitChartText(panel) {
   });
 }
 
+function renderOrderBookPanel(model) {
+  const analysis = model.data.orderBookAnalysis;
+  const stability = model.data.bookStability;
+  const plan = model.data.bookEntry;
+  if (!analysis) return '<section class="order-book-panel"><strong>ORDER BOOK LIQUIDITY</strong><p>Книга недоступна. Вхід заблоковано.</p></section>';
+  const money = value => finiteOrderBookNumber(value) ? "$" + formatNumber(value, 0) : "—";
+  const bands = (analysis.bands || []).map(band =>
+    '<div class="ob-band"><span>±' + band.radiusPercent + '%</span><strong>' +
+      money(band.bidUsd) + ' / ' + money(band.askUsd) + '</strong><small>' +
+      (band.coveredBelow && band.coveredAbove ? "покрито" : "часткове покриття") + '</small></div>'
+  ).join("");
+  const coverage = '<p class="ob-coverage">Покриття нижче / вище ±50%: ' +
+    formatNumber(analysis.coverageBelowPercent, 1) + '% / ' +
+    formatNumber(analysis.coverageAbovePercent, 1) + '%</p>';
+  const ratioText = !stability || stability.shortStrength === null ?
+    "немає даних" : formatNumber(stability.shortStrength, 2);
+  const ready = Boolean(model.strategy?.allowed && analysis.covered &&
+    stability?.shortReady && plan);
+  const status = ready ? "SHORT ENTRY · BOOK CONFIRMED" : "WAIT · BOOK FILTER";
+  const planHtml = plan ? '<div class="ob-levels"><div><span>ENTRY</span><strong>' +
+    formatLevelPrice(plan.entry) + '</strong></div><div><span>STOP · 2×ATR14</span><strong>' +
+    formatLevelPrice(plan.stop) + '</strong></div><div><span>TP1</span><strong>' +
+    formatLevelPrice(plan.tp1) + '</strong></div><div><span>TP2</span><strong>' +
+    formatLevelPrice(plan.tp2) + '</strong></div><div><span>TP3</span><strong>' +
+    formatLevelPrice(plan.tp3) + '</strong></div></div>' :
+    '<p>Рівні не розраховані: недостатньо 15m свічок.</p>';
+  const blockers = [];
+  if (!analysis.covered) blockers.push("Книга не покриває ±50%");
+  if (!stability?.window15?.ready) blockers.push("15 хв: " + (stability?.window15?.reason || "немає спостережень"));
+  if (!stability?.shortReady) blockers.push("Перевага Ask/Bid < 1,5 або не тримається");
+  if (!model.strategy?.allowed) blockers.push("Базова SHORT-стратегія не підтверджена");
+  return '<section class="order-book-panel"><div class="ob-heading"><strong>ORDER BOOK LIQUIDITY · GATE FUTURES</strong><span>' +
+    status + '</span></div><p class="ob-mid">Mid ' + formatLevelPrice(analysis.mid) +
+    ' · Ask/Bid ±50% ' + ratioText + ' · imbalance ' +
+    formatPercent(analysis.imbalancePercent) + '</p><div class="ob-bands">' + bands +
+    '</div>' + coverage + '<p>15 хв: ' +
+    (stability?.window15?.ready ? "безперервні спостереження · " + stability.window15.samples + " знімків" :
+      escapeHtml(stability?.window15?.reason || "прогрів")) +
+    ' · 30 хв: ' + (stability?.window30?.ready ? "підтверджено" : "прогрів / недостатньо даних") +
+    '</p><p>Баланс книги: ' + (analysis.balanceRadiusPercent === null ?
+      "не визначено в покритому діапазоні" : "±" + analysis.balanceRadiusPercent + "%") +
+    ' · знімок ' + (analysis.fetchedAt ? new Date(analysis.fetchedAt).toLocaleTimeString("uk-UA") : "невідомо") +
+    '</p>' + planHtml + '<p class="ob-blockers">' +
+    (ready ? "Умови книги та базової SHORT-стратегії виконані. Це план, не виконаний ордер." :
+      "Вхід заблоковано: " + escapeHtml(blockers.join(" · ") || "умови не підтверджені")) +
+    '</p><small>30 хв підсилює оцінку, але не є ймовірністю прибутку. Книга збирається лише під час відкритої сторінки.</small></section>';
+}
+
+function finiteOrderBookNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function renderCard(pair) {
   const model = models[pair];
   const automaticLabel = automaticPairs.includes(pair) ?
@@ -1497,6 +1552,11 @@ function renderCard(pair) {
       "NO TRADE · дані недоступні", data.orderBook && data.orderBook.quality === "OK" ?
         model.strategy.liquidity.passed ? "OK" : "NO TRADE" : data.orderBook ? data.orderBook.quality : "NO DATA",
       "metric-liquidity") +
+    metric("Bid/Ask · глибина ±50%", data.orderBookAnalysis ?
+      "$" + formatNumber(data.orderBookAnalysis.bidUsd, 0) + " / $" +
+        formatNumber(data.orderBookAnalysis.askUsd, 0) + " · " +
+        formatPercent(data.orderBookAnalysis.imbalancePercent) :
+      "Немає даних", data.orderBookAnalysis?.covered ? "OK" : "NO TRADE", "metric-liquidity") +
     metric("Великі видимі заявки купівлі/продажу", formatVisibleWalls(data.visibleWalls, data.orderBook),
       null, "metric-liquidity") +
     metric("Funding / період", funding + " / " + interval,
@@ -1515,7 +1575,7 @@ function renderCard(pair) {
     metric("RSI / MACD", (data.indicators.rsi === null ? "—" : formatNumber(data.indicators.rsi, 1)) + " / " +
       (data.indicators.macd ? formatNumber(data.indicators.macd.histogram, 6) : "—"), data.indicators.macd ? "OK" : "INCOMPLETE") +
     metric("Довіра моделі", model.confidence, "не ймовірність прибутку") +
-    '</div></details>' + levels + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) +
+    '</div></details>' + levels + renderOrderBookPanel(model) + renderStrategyPanel(model, cvdAnalysis.snapshot(pair), pair) +
     renderSqueezeEnginePanel(model.analysisEngine) +
     '<details class="technical-details"><summary>Додаткові індикатори та повне пояснення</summary>' + renderConfirmation(model) +
     '<p class="why"><strong>Чому?</strong> ' + escapeHtml(readableTechnicalText(model.why)) + '</p></details>' +
@@ -1814,6 +1874,18 @@ function notifyChange(pair, oldState, newState, model) {
   }
 }
 
+function loadOrderBookHistory() {
+  try {
+    const value = JSON.parse(localStorage.getItem(ORDER_BOOK_HISTORY_KEY) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+
+function saveOrderBookHistory() {
+  try { localStorage.setItem(ORDER_BOOK_HISTORY_KEY, JSON.stringify(orderBookHistory)); }
+  catch { noticeNode.hidden = false; noticeNode.textContent = "Історію книги не вдалося зберегти у цьому браузері."; }
+}
+
 function loadSignalEvents() {
   try {
     const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
@@ -2084,6 +2156,11 @@ async function scan() {
         const stats = normalizeContractStats(responses[4], nowSeconds);
         const orderBook = responses[5].quality === "NO DATA" ? responses[5] :
           normalizeOrderBook(responses[5], contractMap.get(pair) ? contractMap.get(pair).quantoMultiplier : null, Date.now());
+        const bookAnalysis = analyzeOrderBook(orderBook);
+        const sampled = appendBookSnapshot(orderBookHistory, pair, bookAnalysis, Date.now());
+        orderBookHistory = sampled.history;
+        if (sampled.accepted) saveOrderBookHistory();
+        const bookStability = evaluateBookStability(sampled.snapshots, Date.now());
         const visibleWalls = typeof visibleWallTracker !== "undefined" ?
           visibleWallTracker.observe(pair, orderBook) : null;
         const model = buildMarketData({
@@ -2097,6 +2174,25 @@ async function scan() {
           nowSeconds: nowSeconds
         });
         model.data.visibleWalls = visibleWalls;
+        model.data.orderBookAnalysis = bookAnalysis;
+        model.data.bookStability = bookStability;
+        model.data.bookEntry = calculateAtrEntry(model.data.candles15, "SHORT", minimumRiskReward);
+        if (model.strategy) {
+          const bookBlockers = [];
+          if (!bookAnalysis.covered) bookBlockers.push("Книга не покриває весь діапазон ±50%");
+          if (bookAnalysis.quality !== "OK") bookBlockers.push("Якість книги: " + bookAnalysis.quality);
+          if (!bookStability.window15.ready) bookBlockers.push("Немає безперервного порівняння книги за 15 хв");
+          if (bookStability.shortStrength === null || bookStability.shortStrength < 1.5) {
+            bookBlockers.push("Перевага Ask недостатня: потрібно Ask/Bid ≥ 1,5");
+          }
+          if (!bookStability.shortStable) bookBlockers.push("Перевага Ask ослабла більш ніж на 10% або не підтверджена");
+          model.strategy.bookLiquidity = { passed: bookBlockers.length === 0, blockers: bookBlockers };
+          if (bookBlockers.length) {
+            model.strategy.allowed = false;
+            model.strategy.blockers = [...(model.strategy.blockers || []), ...bookBlockers];
+            model.strategy.status = "WAIT · ORDER BOOK";
+          }
+        }
         model.data.oiVisualizationHistory = stats.rows;
         model.data.contractInfo = contractMap.get(pair) || null;
         model.analysisEngine = analyzeMarketSqueeze(model.data);
