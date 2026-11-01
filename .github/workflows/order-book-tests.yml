@@ -1,6 +1,15 @@
 name: Order Book Tests
 
 on:
+  push:
+    branches:
+      - "copilot/background-orderbook-history"
+    paths:
+      - "order-book-engine.mjs"
+      - "tests/order-book-engine.test.mjs"
+      - "app.mjs"
+      - "scripts/collect-order-book-history.mjs"
+      - ".github/workflows/**"
   pull_request:
     paths:
       - "order-book-engine.mjs"
