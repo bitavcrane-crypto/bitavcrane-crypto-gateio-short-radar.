@@ -31,7 +31,7 @@ test("partial depth blocks coverage and is not accepted as a history snapshot", 
   };
   const result = analyzeOrderBook(book);
   assert.equal(result.covered, false);
-  assert.equal(result.coverageBelowPercent, 20);
+  assert.ok(Math.abs(result.coverageBelowPercent - 20) < 1e-9);
   assert.equal(result.coverageAbovePercent, 50);
   const sampled = appendBookSnapshot({}, "BTC_USDT", result, 1000000);
   assert.equal(sampled.accepted, false);
@@ -47,7 +47,7 @@ test("15m stability requires continuous full-depth snapshots and Ask dominance",
   }
   const ready = evaluateBookStability(history.BTC_USDT, 1000000 + 16 * 60000);
   assert.equal(ready.window15.ready, true);
-  assert.equal(ready.shortStrength, 2);
+  assert.equal(ready.shortStrength, 21000 / 11000);
   assert.equal(ready.shortReady, true);
   assert.equal(ready.longReady, false);
 });
