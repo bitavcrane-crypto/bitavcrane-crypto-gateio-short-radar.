@@ -66,6 +66,7 @@ let events = loadSignalEvents();
 let orderBookHistory = loadOrderBookHistory();
 let backgroundOrderBookHistory = {};
 let backgroundBookHistoryUpdatedAt = 0;
+let backgroundBookHistoryCheckedAt = 0;
 let backgroundBookHistorySource = "LOCAL";
 let openVisualizations = new Set();
 let openTokens = new Set();
@@ -1931,6 +1932,8 @@ async function loadBackgroundOrderBookHistory() {
     backgroundBookHistorySource = "GITHUB_ACTIONS";
   } catch {
     // Keep valid local history if the public background artifact is not reachable.
+  } finally {
+    backgroundBookHistoryCheckedAt = Date.now();
   }
 }
 
@@ -2115,7 +2118,7 @@ async function scan() {
   if (busy) return;
   busy = true;
   try {
-    if (Date.now() - backgroundBookHistoryUpdatedAt > BACKGROUND_BOOK_REFRESH_MS) {
+    if (Date.now() - backgroundBookHistoryCheckedAt > BACKGROUND_BOOK_REFRESH_MS) {
       await loadBackgroundOrderBookHistory();
     }
     const results = await Promise.all([fetchContracts(), fetchTickers()]);
