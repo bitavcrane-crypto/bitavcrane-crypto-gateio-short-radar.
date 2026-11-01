@@ -108,8 +108,9 @@ function continuousWindow(snapshots, minutes, now) {
   }
   const end = snapshots[snapshots.length - 1];
   const startTarget = end.time - duration;
-  const start = snapshots.find(item => item.time >= startTarget - MAX_GAP_MS);
-  if (!start || end.time - start.time < duration - MAX_GAP_MS) {
+  const eligibleStarts = snapshots.filter(item => item.time <= startTarget);
+  const start = eligibleStarts.length ? eligibleStarts[eligibleStarts.length - 1] : null;
+  if (!start || startTarget - start.time > MAX_GAP_MS) {
     return { ready: false, reason: "Період спостереження ще не завершився." };
   }
   const window = snapshots.filter(item => item.time >= start.time && item.time <= end.time);
