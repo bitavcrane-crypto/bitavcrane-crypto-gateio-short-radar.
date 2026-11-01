@@ -264,3 +264,26 @@ footer p { margin: 5px 0; }
 .cvd-stage-context { margin: 8px 0 0 !important; padding: 8px 10px; color: #f4d28a !important; border-left: 2px solid #e7b85f; background: #181f2b; }
 .cvd-status, .cvd-divergence { font-size: .85rem; overflow-wrap: anywhere; }
 .cvd-analysis select { color: inherit; background: #101722; margin: .75rem 0; padding: .35rem; }
+
+
+.order-book-panel { margin-top: 13px; padding: 12px; border: 1px solid #385467; border-radius: 10px; background: #101c28; color: #c6d5e5; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.ob-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 7px; color: #dceaf5; }
+.ob-heading span { color: #ffd17c; font-weight: 900; }
+.ob-mid, .ob-coverage { margin: 7px 0; color: #a9c4d8; font-variant-numeric: tabular-nums; }
+.ob-bands { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: 9px 0; }
+.ob-band { display: grid; gap: 3px; min-width: 0; padding: 7px 4px; border-radius: 6px; background: #172535; text-align: center; }
+.ob-band span { color: #8eb4ce; font-weight: 800; }
+.ob-band strong { color: #e2edf5; font-size: 10px; overflow-wrap: anywhere; }
+.ob-band small { color: #94a8bb; font-size: 9px; }
+.ob-levels { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+.ob-levels > div { display: grid; gap: 3px; min-width: 0; padding: 7px 4px; border: 1px solid #30465b; border-radius: 6px; background: #111e2c; text-align: center; }
+.ob-levels span { color: #8da3b9; font-size: 9px; }
+.ob-levels strong { color: #d9e8f4; font-size: 10px; overflow-wrap: anywhere; }
+.ob-levels > div:nth-child(2) strong { color: #ffaaa2; }
+.ob-levels > div:nth-child(n+3) strong { color: #83d8b1; }
+.ob-blockers { margin: 9px 0 !important; padding: 8px; border-left: 2px solid #e8b86d; background: #211d16; color: #ffd17c !important; }
+.order-book-panel > small { color: #8298ac; }
+@media (max-width: 520px) {
+  .ob-bands { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ob-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
