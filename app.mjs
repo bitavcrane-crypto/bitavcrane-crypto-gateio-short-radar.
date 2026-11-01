@@ -1450,7 +1450,12 @@ function renderOrderBookPanel(model) {
   return '<section class="order-book-panel"><div class="ob-heading"><strong>ORDER BOOK LIQUIDITY · GATE FUTURES</strong><span>' +
     status + '</span></div><p class="ob-mid">Mid ' + formatLevelPrice(analysis.mid) +
     ' · Ask/Bid ±50% ' + ratioText + ' · imbalance ' +
-    formatPercent(analysis.imbalancePercent) + '</p><div class="ob-bands">' + bands +
+    formatPercent(analysis.imbalancePercent) + '</p><p>Рівнів bid / ask: ' +
+    (analysis.bidLevelsCount ?? "—") + ' / ' + (analysis.askLevelsCount ?? "—") +
+    ' · LONG Bid/Ask: ' + (stability?.longStrength === null || !stability ?
+      "немає даних" : formatNumber(stability.longStrength, 2) +
+        (stability.longReady ? " · підтверджено книгою" : " · не підтверджено")) +
+    '</p><div class="ob-bands">' + bands +
     '</div>' + coverage + '<p>15 хв: ' +
     (stability?.window15?.ready ? "безперервні спостереження · " + stability.window15.samples + " знімків" :
       escapeHtml(stability?.window15?.reason || "прогрів")) +
