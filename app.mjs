@@ -33,6 +33,9 @@ const OPEN_INTEREST_STATE_KEY = "gate-short-radar-oi-visualization-state";
 const MINIMUM_RISK_REWARD_KEY = "gate-short-radar-minimum-risk-reward";
 const EVENTS_KEY = "gate-short-radar-signal-events-v1";
 const ORDER_BOOK_HISTORY_KEY = "gate-order-book-history-v1";
+const BACKGROUND_BOOK_HISTORY_URL = "./data/order-book-history.json";
+const BACKGROUND_BOOK_MAX_GAP_MS = 8 * 60 * 1000;
+const BACKGROUND_BOOK_REFRESH_MS = 2 * 60 * 1000;
 const CHART_LAYERS_KEY = "gate-short-radar-chart-layers-v1";
 const DEFAULT_VISUALIZATION_SETTINGS = {
   rci: { periods: [6, 12, 24], upper: 95, lower: 5 }, ema: { periods: [200, 55, 22] }
@@ -61,6 +64,9 @@ let models = {};
 let pairErrors = {};
 let events = loadSignalEvents();
 let orderBookHistory = loadOrderBookHistory();
+let backgroundOrderBookHistory = {};
+let backgroundBookHistoryUpdatedAt = 0;
+let backgroundBookHistorySource = "LOCAL";
 let openVisualizations = new Set();
 let openTokens = new Set();
 let chartWindows = {};
@@ -1457,7 +1463,7 @@ function renderOrderBookPanel(model) {
         (stability.longReady ? " · підтверджено книгою" : " · не підтверджено")) +
     '</p><div class="ob-bands">' + bands +
     '</div>' + coverage + '<p>15 хв: ' +
-    (stability?.window15?.ready ? "безперервні спостереження · " + stability.window15.samples + " знімків" :
+    (stability?.window15?.ready ? "історичні знімки · " + stability.window15.samples + " знімків" :
       escapeHtml(stability?.window15?.reason || "прогрів")) +
     ' · 30 хв Ask/Bid: ' + (stability?.shortStrength30 === null || !stability?.window30?.ready ?
       "ще немає даних" : formatNumber(stability.shortStrength30, 2) +
@@ -1468,7 +1474,10 @@ function renderOrderBookPanel(model) {
     '</p>' + planHtml + '<p class="ob-blockers">' +
     (ready ? "Умови книги та базової SHORT-стратегії виконані. Це план, не виконаний ордер." :
       "Вхід заблоковано: " + escapeHtml(blockers.join(" · ") || "умови не підтверджені")) +
-    '</p><small>30 хв підсилює оцінку, але не є ймовірністю прибутку. Книга збирається лише під час відкритої сторінки.</small></section>';
+    '</p><small>30 хв підсилює оцінку, але не є ймовірністю прибутку. ' +
+    (model.data.bookHistorySource === "GITHUB_ACTIONS" ?
+      "Фонова історія GitHub Actions: цільовий інтервал 5 хв; прогалина понад 8 хв блокує підтвердження." :
+      "Локальні знімки збираються лише під час відкритої сторінки.") + '</small></section>';
 }
 
 function finiteOrderBookNumber(value) {
@@ -1893,6 +1902,38 @@ function saveOrderBookHistory() {
   catch { noticeNode.hidden = false; noticeNode.textContent = "Історію книги не вдалося зберегти у цьому браузері."; }
 }
 
+async function loadBackgroundOrderBookHistory() {
+  try {
+    const response = await fetch(BACKGROUND_BOOK_HISTORY_URL + "?v=" + Date.now(), {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const payload = await response.json();
+    if (!payload || payload.schemaVersion !== 1 || !payload.contracts ||
+        typeof payload.contracts !== "object" || Array.isArray(payload.contracts)) {
+      throw new Error("Некоректний формат фонової історії книги.");
+    }
+    const now = Date.now();
+    const normalized = {};
+    Object.entries(payload.contracts).forEach(function ([contract, rows]) {
+      if (typeof contract !== "string" || !Array.isArray(rows)) return;
+      normalized[contract] = rows.filter(function (row) {
+        return row && Number.isFinite(row.time) && row.time > 0 &&
+          row.time <= now + 5000 && now - row.time <= 3 * 60 * 60 * 1000 &&
+          Number.isFinite(row.bidUsd) && row.bidUsd > 0 &&
+          Number.isFinite(row.askUsd) && row.askUsd > 0;
+      }).sort(function (a, b) { return a.time - b.time; }).slice(-40);
+    });
+    backgroundOrderBookHistory = normalized;
+    backgroundBookHistoryUpdatedAt = Number.isFinite(payload.updatedAt) ? payload.updatedAt : 0;
+    backgroundBookHistorySource = "GITHUB_ACTIONS";
+  } catch {
+    // Keep valid local history if the public background artifact is not reachable.
+  }
+}
+
 function loadSignalEvents() {
   try {
     const parsed = JSON.parse(localStorage.getItem(EVENTS_KEY) || "[]");
@@ -2074,6 +2115,9 @@ async function scan() {
   if (busy) return;
   busy = true;
   try {
+    if (Date.now() - backgroundBookHistoryUpdatedAt > BACKGROUND_BOOK_REFRESH_MS) {
+      await loadBackgroundOrderBookHistory();
+    }
     const results = await Promise.all([fetchContracts(), fetchTickers()]);
     const normalizedContracts = results[0].map(normalizeContract).filter(Boolean);
     contracts = normalizedContracts.filter(function (item) { return item.active; });
@@ -2167,7 +2211,15 @@ async function scan() {
         const sampled = appendBookSnapshot(orderBookHistory, pair, bookAnalysis, Date.now());
         orderBookHistory = sampled.history;
         if (sampled.accepted) saveOrderBookHistory();
-        const bookStability = evaluateBookStability(sampled.snapshots, Date.now());
+        const backgroundSnapshots = Array.isArray(backgroundOrderBookHistory[pair]) ?
+          backgroundOrderBookHistory[pair] : [];
+        const mergedBookSnapshots = [...backgroundSnapshots, ...sampled.snapshots]
+          .filter(item => item && Number.isFinite(item.time))
+          .sort((a, b) => a.time - b.time)
+          .filter((item, index, rows) => index === 0 || item.time !== rows[index - 1].time)
+          .slice(-80);
+        const bookStability = evaluateBookStability(mergedBookSnapshots, Date.now(),
+          backgroundSnapshots.length ? { maxGapMs: BACKGROUND_BOOK_MAX_GAP_MS } : undefined);
         const visibleWalls = typeof visibleWallTracker !== "undefined" ?
           visibleWallTracker.observe(pair, orderBook) : null;
         const model = buildMarketData({
@@ -2183,12 +2235,14 @@ async function scan() {
         model.data.visibleWalls = visibleWalls;
         model.data.orderBookAnalysis = bookAnalysis;
         model.data.bookStability = bookStability;
+        model.data.bookHistorySource = backgroundSnapshots.length ? backgroundBookHistorySource : "LOCAL";
+        model.data.bookHistoryUpdatedAt = backgroundBookHistoryUpdatedAt;
         model.data.bookEntry = calculateAtrEntry(model.data.candles15, "SHORT", minimumRiskReward);
         if (model.strategy) {
           const bookBlockers = [];
           if (!bookAnalysis.covered) bookBlockers.push("Книга не покриває весь діапазон ±50%");
           if (bookAnalysis.quality !== "OK") bookBlockers.push("Якість книги: " + bookAnalysis.quality);
-          if (!bookStability.window15.ready) bookBlockers.push("Немає безперервного порівняння книги за 15 хв");
+          if (!bookStability.window15.ready) bookBlockers.push("Немає достатніх історичних знімків книги за 15 хв");
           if (bookStability.shortStrength === null || bookStability.shortStrength < 1.5) {
             bookBlockers.push("Перевага Ask недостатня: потрібно Ask/Bid ≥ 1,5");
           }
