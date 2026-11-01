@@ -122,6 +122,10 @@ for (const item of collected) {
   history[item.contract] = rows.sort((a, b) => a.time - b.time).slice(-40);
   accepted += 1;
 }
+if (accepted === 0) {
+  console.log("No valid full-coverage order-book snapshots; keeping the previous history unchanged.");
+  process.exit(0);
+}
 await mkdir("data", { recursive: true });
 await writeFile(OUTPUT, JSON.stringify({
   schemaVersion: 1,
