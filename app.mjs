@@ -1454,7 +1454,9 @@ function renderOrderBookPanel(model) {
     '</div>' + coverage + '<p>15 хв: ' +
     (stability?.window15?.ready ? "безперервні спостереження · " + stability.window15.samples + " знімків" :
       escapeHtml(stability?.window15?.reason || "прогрів")) +
-    ' · 30 хв: ' + (stability?.window30?.ready ? "підтверджено" : "прогрів / недостатньо даних") +
+    ' · 30 хв Ask/Bid: ' + (stability?.shortStrength30 === null || !stability?.window30?.ready ?
+      "ще немає даних" : formatNumber(stability.shortStrength30, 2) +
+        (stability.shortStable30 ? " · стійко" : " · ослабло")) +
     '</p><p>Баланс книги: ' + (analysis.balanceRadiusPercent === null ?
       "не визначено в покритому діапазоні" : "±" + analysis.balanceRadiusPercent + "%") +
     ' · знімок ' + (analysis.fetchedAt ? new Date(analysis.fetchedAt).toLocaleTimeString("uk-UA") : "невідомо") +
