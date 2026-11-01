@@ -126,7 +126,7 @@ test("order book requests use the futures contract and normalize executable dept
   const book = normalizeOrderBook(rawBook, 0.01, 12345);
   assert.equal(requested.pathname, "/api/v4/futures/usdt/order_book");
   assert.equal(requested.searchParams.get("contract"), "BTC_USDT");
-  assert.equal(requested.searchParams.get("limit"), "20");
+  assert.equal(requested.searchParams.get("limit"), "300");
   assert.equal(book.quality, "OK");
   assert.ok(book.spreadPercent > 0);
   assert.equal(book.depthUsd, 99.9);

@@ -92,7 +92,7 @@ export async function fetchUsdcUsdtRate(signal) {
 }
 
 export async function fetchOrderBook(contract) {
-  const query = "?contract=" + encodeURIComponent(contract) + "&limit=20&with_id=true";
+  const query = "?contract=" + encodeURIComponent(contract) + "&limit=300&with_id=true";
   const book = await request("/futures/usdt/order_book" + query, CACHE_MS);
   if (!book || typeof book !== "object" || Array.isArray(book)) {
     throw new Error("Некоректна книга заявок " + contract);
